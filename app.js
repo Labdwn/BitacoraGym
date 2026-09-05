@@ -676,7 +676,7 @@ document.getElementById("importFile").addEventListener("change", async (e) => {
   if (!file) return;
   try {
     const buf = await file.arrayBuffer();
-    const wb = XLSX.read(buf, { type: "array" });
+    const wb = XLSX.read(buf, { type: "array", cellDates: true });
     const dayKeys = Object.keys(DEFAULT_ROUTINE);
     let importedCount = 0;
 
@@ -719,11 +719,131 @@ document.getElementById("importFile").addEventListener("change", async (e) => {
     } else {
       showToast("No se encontraron hojas de días válidas");
     }
+
+    // Also scan the whole workbook for historical logs (any sheet with date columns)
+    importFullHistory(wb);
   } catch (err) {
     showToast("Error al leer el archivo");
   }
   e.target.value = "";
 });
+
+// ---------- Full history import (any sheet with date-headed columns) ----------
+function normName(s) {
+  return String(s || "")
+    .trim()
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/^ss\d+\s+/i, "")
+    .replace(/\s*\(ss\d+\)\s*/i, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function buildNameIndex() {
+  const idx = [];
+  allExercisesFlat().forEach((ex) => idx.push({ id: ex.id, norm: normName(ex.name) }));
+  return idx;
+}
+
+function matchExercise(rawName, nameIndex) {
+  const n = normName(rawName);
+  if (!n || n.length < 4) return null; // avoid spurious matches from short/numeric fragments
+  let best = nameIndex.find((e) => e.norm === n);
+  if (best) return best.id;
+  // fuzzy: substring either direction, prefer longest overlap (min 4 chars to avoid false positives)
+  let bestLen = 0;
+  nameIndex.forEach((e) => {
+    if (e.norm.length < 4) return;
+    if (e.norm.includes(n) || n.includes(e.norm)) {
+      const len = Math.min(e.norm.length, n.length);
+      if (len >= 4 && len > bestLen) { bestLen = len; best = e; }
+    }
+  });
+  return best ? best.id : null;
+}
+
+const HIST_CELL_RE = /^\s*([\d.]+)\s*(kg|lb)\s*(?:xl)?\s*\|\s*(\d+)\s*r\+?\s*(?:\|\s*(.+))?\s*$/i;
+
+function importFullHistory(wb) {
+  const nameIndex = buildNameIndex();
+  let imported = 0, skippedUnparsed = 0;
+  const unmatched = new Set();
+
+  wb.SheetNames.forEach((sheetName) => {
+    const ws = wb.Sheets[sheetName];
+    if (!ws["!ref"]) return;
+    const range = XLSX.utils.decode_range(ws["!ref"]);
+
+    for (let r = range.s.r; r <= range.e.r; r++) {
+      // find date columns in this row
+      const dateCols = [];
+      for (let c = range.s.c; c <= range.e.c; c++) {
+        const cell = ws[XLSX.utils.encode_cell({ r, c })];
+        if (cell && cell.t === "d" && cell.v instanceof Date) {
+          dateCols.push({ c, iso: cell.v.toISOString().slice(0, 10) });
+        }
+      }
+      if (dateCols.length < 1) continue; // not a header row
+
+      // scan subsequent rows until we hit another header row or run out
+      for (let rr = r + 1; rr <= range.e.r; rr++) {
+        // stop if this row is itself a new header (has date cells)
+        let isHeader = false;
+        for (const dc of dateCols) {
+          const c2 = ws[XLSX.utils.encode_cell({ r: rr, c: dc.c })];
+          if (c2 && c2.t === "d") { isHeader = true; break; }
+        }
+        if (isHeader) break;
+
+        // find the exercise name: first non-empty text cell left of the first date column
+        let name = null;
+        for (let c = range.s.c; c < dateCols[0].c; c++) {
+          const cell = ws[XLSX.utils.encode_cell({ r: rr, c })];
+          if (cell && cell.v != null && String(cell.v).trim() !== "") { name = String(cell.v).trim(); break; }
+        }
+        if (!name) continue;
+
+        const exId = matchExercise(name, nameIndex);
+        if (!exId) { unmatched.add(name); continue; }
+
+        dateCols.forEach(({ c, iso }) => {
+          const cell = ws[XLSX.utils.encode_cell({ r: rr, c })];
+          if (!cell || cell.v == null || String(cell.v).trim() === "") return;
+          const raw = String(cell.v).trim();
+          const m = raw.match(HIST_CELL_RE);
+          if (!m) { skippedUnparsed++; return; }
+          const weight = parseFloat(m[1]);
+          const unit = m[2].toLowerCase();
+          const reps = parseInt(m[3], 10);
+          const equip = (m[4] || "").trim();
+
+          const existing = logs[exId] || [];
+          const dup = existing.some((l) => l.date === iso && l.weight === weight && l.unit === unit && l.reps === reps && (l.equip || "") === equip);
+          if (dup) return;
+
+          existing.push({
+            id: `imp_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+            date: iso, weight, unit, reps, equip, notes: "Importado de Excel",
+          });
+          logs[exId] = existing;
+          imported++;
+        });
+      }
+    }
+  });
+
+  if (imported > 0) saveLogs();
+  render();
+
+  let msg = `Historial importado: ${imported} registros.`;
+  if (skippedUnparsed > 0) msg += ` ${skippedUnparsed} celdas no se pudieron leer (formato distinto).`;
+  if (unmatched.size > 0) msg += `\n\nEjercicios sin coincidencia (no importados):\n- ${[...unmatched].join("\n- ")}`;
+  if (imported > 0 || skippedUnparsed > 0 || unmatched.size > 0) {
+    setTimeout(() => alert(msg), 300);
+  }
+}
 
 document.getElementById("btnExport").addEventListener("click", () => {
   const wb = XLSX.utils.book_new();
