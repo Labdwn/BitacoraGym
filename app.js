@@ -63,6 +63,13 @@ let activeDay = Object.keys(routine)[0];
 let editMode = false;
 let expanded = {};
 
+function sortByDateAsc(arr) {
+  return arr.slice().sort((a, b) => a.date.localeCompare(b.date) || a.id.localeCompare(b.id));
+}
+function sortByDateDesc(arr) {
+  return arr.slice().sort((a, b) => b.date.localeCompare(a.date) || b.id.localeCompare(a.id));
+}
+
 function loadJSON(key, fallback) {
   try {
     const raw = localStorage.getItem(key);
@@ -123,7 +130,7 @@ function render() {
 }
 
 function cardHTML(ex) {
-  const entries = logs[ex.id] || [];
+  const entries = sortByDateDesc(logs[ex.id] || []);
   const last = entries[0];
   if (editMode) {
     return `
@@ -465,7 +472,7 @@ function statsBuildExerciseSelect(selectedId) {
 }
 
 function statsRenderExerciseChart(exId) {
-  const entries = (logs[exId] || []).slice().reverse(); // oldest to newest
+  const entries = sortByDateAsc(logs[exId] || []); // chronological, oldest to newest
   const wrap = document.getElementById("statsExerciseArea");
   if (entries.length === 0) {
     wrap.innerHTML = `<p style="font-size:13px;color:var(--txt-dim);">Aún no hay registros para este ejercicio.</p>`;
@@ -723,11 +730,11 @@ document.getElementById("btnExport").addEventListener("click", () => {
   Object.values(routine).forEach((day) => {
     const rows = [["Ejercicio", "Fecha", "Peso", "Unidad", "Reps", "Equipo", "Notas"]];
     day.exercises.forEach((ex) => {
-      const entries = logs[ex.id] || [];
+      const entries = sortByDateAsc(logs[ex.id] || []);
       if (entries.length === 0) {
         rows.push([ex.name, "", "", "", "", "", ""]);
       } else {
-        entries.slice().reverse().forEach((entry) => {
+        entries.forEach((entry) => {
           rows.push([ex.name, entry.date, entry.weight, entry.unit, entry.reps, entry.equip || "", entry.notes || ""]);
         });
       }
