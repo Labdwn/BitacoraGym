@@ -158,6 +158,7 @@ function cardHTML(ex) {
       ${entries.length > 0 ? `<button class="hist-btn" data-action="toggle-hist">${entries.length} registro${entries.length !== 1 ? "s" : ""} ${expanded[ex.id] ? "&#9650;" : "&#9660;"}</button>` : ""}
     </div>
     <div class="form hidden" data-role="form">
+      <input class="input-full" type="date" data-field="date" value="${todayISO()}" style="margin-bottom:2px;">
       <div class="form-row">
         <input class="input" type="number" inputmode="decimal" placeholder="Peso" data-field="weight" value="${last ? last.weight : ""}">
         <div class="unit-toggle">
@@ -230,9 +231,10 @@ function wireCard(ex) {
     const reps = formEl.querySelector('[data-field="reps"]').value;
     const equip = formEl.querySelector('[data-field="equip"]').value;
     const notes = formEl.querySelector('[data-field="notes"]').value;
+    const dateVal = formEl.querySelector('[data-field="date"]').value || todayISO();
     const unit = formEl.querySelector(".unit-btn.active")?.dataset.unit || "lb";
     if (!weight || !reps) { showToast("Falta peso o reps"); return; }
-    const entry = { id: `${Date.now()}`, date: todayISO(), weight: parseFloat(weight), unit, reps: parseInt(reps, 10), equip: equip.trim(), notes: notes.trim() };
+    const entry = { id: `${Date.now()}`, date: dateVal, weight: parseFloat(weight), unit, reps: parseInt(reps, 10), equip: equip.trim(), notes: notes.trim() };
     logs[ex.id] = [entry, ...(logs[ex.id] || [])];
     saveLogs();
     showToast("Registrado");
