@@ -116,6 +116,7 @@ function render() {
   main.innerHTML = day.exercises.map((ex) => cardHTML(ex)).join("") +
     (editMode ? `<button class="add-ex-btn" id="addExBtn">+ Agregar ejercicio</button>` : "");
   document.getElementById("btnEdit").classList.toggle("active", editMode);
+  gsUpdateStatus();
 
   // wire events
   day.exercises.forEach((ex) => wireCard(ex));
@@ -241,12 +242,12 @@ function wireCard(ex) {
     const dateVal = formEl.querySelector('[data-field="date"]').value || todayISO();
     const unit = formEl.querySelector(".unit-btn.active")?.dataset.unit || "lb";
     if (!weight || !reps) { showToast("Falta peso o reps"); return; }
-    const entry = { id: `${Date.now()}`, date: dateVal, weight: parseFloat(weight), unit, reps: parseInt(reps, 10), equip: equip.trim(), notes: notes.trim() };
+    const entry = { id: `${Date.now()}`, date: dateVal, weight: parseFloat(weight), unit, reps: parseInt(reps, 10), equip: equip.trim(), notes: notes.trim(), synced: false };
     logs[ex.id] = [entry, ...(logs[ex.id] || [])];
     saveLogs();
     showToast("Registrado");
     render();
-    gsAppendRow(routine[activeDay].label, [ex.name, entry.date, entry.weight, entry.unit, entry.reps, entry.equip, entry.notes]);
+    gsAppendRow(routine[activeDay].label, ex.id, entry.id, [ex.name, entry.date, entry.weight, entry.unit, entry.reps, entry.equip, entry.notes]);
   });
 
   card.querySelectorAll('[data-action="del-log"]').forEach((btn) => {
@@ -272,11 +273,16 @@ let gsSpreadsheetId = localStorage.getItem(GS_SHEET_ID_KEY) || "";
 
 function gsUpdateStatus() {
   const el = document.getElementById("sheetsStatus");
+  const pendingCount = Object.values(logs).reduce((sum, arr) => sum + arr.filter((l) => !l.synced).length, 0);
   if (gsSpreadsheetId && gsAccessToken) {
-    el.textContent = "✓ Conectado a Google Sheets — cada registro se guarda ahí también";
+    el.textContent = pendingCount > 0
+      ? `✓ Conectado a Google Sheets — ${pendingCount} pendiente${pendingCount !== 1 ? "s" : ""} por sincronizar`
+      : "✓ Conectado a Google Sheets — todo sincronizado";
     el.classList.remove("hidden");
-  } else if (gsSpreadsheetId) {
-    el.textContent = "Google Sheets vinculado, pero desconectado esta sesión — toca el ícono de hoja para reconectar";
+  } else if (gsSpreadsheetId || pendingCount > 0) {
+    el.textContent = pendingCount > 0
+      ? `Desconectado — ${pendingCount} registro${pendingCount !== 1 ? "s" : ""} pendiente${pendingCount !== 1 ? "s" : ""} de sincronizar (toca el ícono de hoja)`
+      : "Google Sheets vinculado, pero desconectado esta sesión — toca el ícono de hoja para reconectar";
     el.classList.remove("hidden");
   } else {
     el.classList.add("hidden");
@@ -351,7 +357,7 @@ async function gsCreateSpreadsheet() {
   return gsSpreadsheetId;
 }
 
-async function gsAppendRow(dayLabel, rowValues) {
+async function gsAppendRow(dayLabel, exId, entryId, rowValues) {
   if (!gsClientId) return; // not configured, silently skip
   try {
     if (!gsSpreadsheetId) await gsCreateSpreadsheet();
@@ -363,10 +369,136 @@ async function gsAppendRow(dayLabel, rowValues) {
         body: JSON.stringify({ values: [rowValues] }),
       }
     );
+    // mark as synced so a later "sync pending" pass doesn't resend it
+    if (exId && entryId) {
+      const arr = logs[exId] || [];
+      const found = arr.find((l) => l.id === entryId);
+      if (found) { found.synced = true; saveLogs(); }
+    }
     gsUpdateStatus();
   } catch (e) {
-    showToast("No se pudo sincronizar con Sheets (se guardó localmente)");
+    showToast("No se pudo sincronizar con Sheets (se guardó localmente, pendiente)");
   }
+}
+
+async function gsSyncPending() {
+  if (!gsClientId) { showToast("Configura primero el Client ID"); return; }
+  const pending = [];
+  Object.entries(routine).forEach(([dayKey, day]) => {
+    day.exercises.forEach((ex) => {
+      (logs[ex.id] || []).forEach((entry) => {
+        if (!entry.synced) pending.push({ day, ex, entry });
+      });
+    });
+  });
+  if (pending.length === 0) { showToast("No hay registros pendientes"); return; }
+
+  showToast(`Sincronizando ${pending.length} registros...`);
+  let ok = 0, fail = 0;
+  try {
+    if (!gsAccessToken) await gsRequestToken("");
+  } catch (e) {
+    showToast("No se pudo conectar con Google");
+    return;
+  }
+  if (!gsSpreadsheetId) {
+    try { await gsCreateSpreadsheet(); } catch (e) { showToast("No se pudo crear la hoja"); return; }
+  }
+  for (const { day, ex, entry } of pending) {
+    try {
+      await gsFetch(
+        `https://sheets.googleapis.com/v4/spreadsheets/${gsSpreadsheetId}/values/${encodeURIComponent(day.label)}!A:G:append?valueInputOption=USER_ENTERED`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ values: [[ex.name, entry.date, entry.weight, entry.unit, entry.reps, entry.equip || "", entry.notes || ""]] }),
+        }
+      );
+      entry.synced = true;
+      ok++;
+    } catch (e) {
+      fail++;
+    }
+  }
+  saveLogs();
+  gsUpdateStatus();
+  showToast(`Sincronizado: ${ok}${fail > 0 ? `, fallaron: ${fail}` : ""}`);
+}
+
+// ---------- Pull data FROM Sheets (so every device converges on the same data) ----------
+function gsExtractSheetId(input) {
+  const s = input.trim();
+  const m = s.match(/\/d\/([a-zA-Z0-9-_]+)/);
+  if (m) return m[1];
+  if (/^[a-zA-Z0-9-_]{20,}$/.test(s)) return s; // looks like a raw ID already
+  return null;
+}
+
+async function gsLinkExistingSheet(idOrUrl) {
+  const id = gsExtractSheetId(idOrUrl);
+  if (!id) { showToast("No pude leer ese enlace/ID"); return; }
+  gsSpreadsheetId = id;
+  localStorage.setItem(GS_SHEET_ID_KEY, id);
+  try {
+    await gsRequestToken("consent");
+  } catch (e) {
+    showToast("No se pudo conectar con Google");
+    return;
+  }
+  await gsPullAll();
+  showToast("Hoja vinculada y datos traídos");
+}
+
+async function gsPullAll(silent) {
+  if (!gsClientId || !gsSpreadsheetId) return { pulled: 0 };
+  try {
+    if (!gsAccessToken) await gsRequestToken(silent ? "" : "");
+  } catch (e) {
+    if (!silent) showToast("No se pudo conectar con Google");
+    return { pulled: 0 };
+  }
+  let pulled = 0;
+  try {
+    const metaRes = await gsFetch(
+      `https://sheets.googleapis.com/v4/spreadsheets/${gsSpreadsheetId}?fields=sheets.properties.title`
+    );
+    if (!metaRes.ok) throw new Error("meta-failed");
+    const meta = await metaRes.json();
+    const sheetTitles = (meta.sheets || []).map((s) => s.properties.title);
+    const nameIndex = buildNameIndex();
+
+    for (const title of sheetTitles) {
+      const valRes = await gsFetch(
+        `https://sheets.googleapis.com/v4/spreadsheets/${gsSpreadsheetId}/values/${encodeURIComponent(title)}!A2:G100000`
+      );
+      if (!valRes.ok) continue;
+      const data = await valRes.json();
+      const rows = data.values || [];
+      rows.forEach((row) => {
+        const [name, date, weight, unit, reps, equip, notes] = row;
+        if (!name || !date || weight == null || reps == null) return;
+        const exId = matchExercise(name, nameIndex);
+        if (!exId) return;
+        const w = parseFloat(weight), rp = parseInt(reps, 10);
+        if (isNaN(w) || isNaN(rp)) return;
+        const existing = logs[exId] || [];
+        const dup = existing.some((l) => l.date === date && l.weight === w && l.unit === (unit || "lb") && l.reps === rp && (l.equip || "") === (equip || ""));
+        if (dup) return;
+        existing.push({
+          id: `pull_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+          date, weight: w, unit: unit || "lb", reps: rp, equip: equip || "", notes: notes || "",
+          synced: true,
+        });
+        logs[exId] = existing;
+        pulled++;
+      });
+    }
+    if (pulled > 0) { saveLogs(); render(); }
+  } catch (e) {
+    if (!silent) showToast("No se pudo traer datos de Sheets");
+    return { pulled };
+  }
+  return { pulled };
 }
 
 function gsOpenSheet() {
@@ -398,13 +530,22 @@ function gsRenderModal() {
     return;
   }
   const connected = !!gsAccessToken;
+  const pendingCount = Object.values(logs).reduce((sum, arr) => sum + arr.filter((l) => !l.synced).length, 0);
   body.innerHTML = `
     <p style="font-size:13px;color:var(--txt-dim);margin-bottom:10px;">
       ${gsSpreadsheetId ? "Hoja vinculada." : "Aún no se ha creado la hoja — se crea sola al conectar."}
       ${connected ? " Conectado ✓" : " No conectado esta sesión."}
     </p>
+    ${pendingCount > 0 ? `<p style="font-size:12.5px;color:var(--accent);margin-bottom:10px;">${pendingCount} registro${pendingCount !== 1 ? "s" : ""} pendiente${pendingCount !== 1 ? "s" : ""} de sincronizar</p>` : ""}
     <button class="save-btn" id="gsConnectBtn" style="margin-bottom:8px;">${connected ? "Reconectar" : "Conectar con Google"}</button>
+    ${connected && gsSpreadsheetId ? `<button class="log-btn" id="gsPullBtn" style="width:100%;justify-content:center;margin-bottom:8px;">Actualizar desde Sheets</button>` : ""}
+    ${pendingCount > 0 ? `<button class="log-btn" id="gsSyncBtn" style="width:100%;justify-content:center;margin-bottom:8px;">Sincronizar ${pendingCount} pendiente${pendingCount !== 1 ? "s" : ""}</button>` : ""}
     ${gsSpreadsheetId ? `<button class="hist-btn" id="gsOpenBtn" style="width:100%;justify-content:center;margin-bottom:8px;">Abrir hoja en Google Sheets</button>` : ""}
+    <div style="border-top:1px solid var(--line);margin:10px 0;padding-top:10px;">
+      <p style="font-size:12px;color:var(--txt-dim);margin-bottom:6px;">¿Ya tienes la hoja creada en otro dispositivo? Pega el enlace aquí para usar la misma:</p>
+      <input id="gsLinkInput" class="input-full" placeholder="Enlace o ID de Google Sheets" style="margin-bottom:8px;">
+      <button class="hist-btn" id="gsLinkBtn" style="width:100%;justify-content:center;margin-bottom:8px;">Vincular y traer datos</button>
+    </div>
     <button class="hist-btn" id="gsResetBtn" style="width:100%;justify-content:center;margin-bottom:8px;">Cambiar Client ID</button>
     <button class="hist-btn" id="gsCloseModal" style="width:100%;justify-content:center;">Cerrar</button>
   `;
@@ -412,11 +553,32 @@ function gsRenderModal() {
     try {
       await gsRequestToken("consent");
       showToast("Conectado a Google");
+      const res = await gsPullAll(true);
+      if (res.pulled > 0) showToast(`${res.pulled} registros nuevos traídos de Sheets`);
       gsUpdateStatus();
       gsRenderModal();
     } catch (e) {
       showToast("No se pudo conectar");
     }
+  });
+  const pullBtn = document.getElementById("gsPullBtn");
+  if (pullBtn) pullBtn.addEventListener("click", async () => {
+    const res = await gsPullAll(false);
+    showToast(res.pulled > 0 ? `${res.pulled} registros nuevos traídos` : "Ya estabas al día");
+    gsRenderModal();
+  });
+  const linkBtn = document.getElementById("gsLinkBtn");
+  if (linkBtn) linkBtn.addEventListener("click", async () => {
+    const val = document.getElementById("gsLinkInput").value;
+    if (!val.trim()) return;
+    await gsLinkExistingSheet(val);
+    gsUpdateStatus();
+    gsRenderModal();
+  });
+  const syncBtn = document.getElementById("gsSyncBtn");
+  if (syncBtn) syncBtn.addEventListener("click", async () => {
+    await gsSyncPending();
+    gsRenderModal();
   });
   const openBtn = document.getElementById("gsOpenBtn");
   if (openBtn) openBtn.addEventListener("click", gsOpenSheet);
@@ -635,12 +797,115 @@ function statsRenderVolumePerDay() {
   });
 }
 
+function statsOverviewHTML() {
+  const allLogs = Object.values(logs).flat();
+  const totalEntries = allLogs.length;
+  const distinctDates = new Set(allLogs.map((l) => l.date));
+  const totalSessions = distinctDates.size;
+  const totalVolume = allLogs.reduce((sum, l) => sum + (l.weight || 0) * (l.reps || 0), 0);
+
+  const countByEx = {};
+  Object.entries(logs).forEach(([exId, arr]) => { countByEx[exId] = arr.length; });
+  let mostTrainedId = null, mostTrainedCount = 0;
+  Object.entries(countByEx).forEach(([exId, c]) => { if (c > mostTrainedCount) { mostTrainedCount = c; mostTrainedId = exId; } });
+  const mostTrainedEx = allExercisesFlat().find((e) => e.id === mostTrainedId);
+
+  if (totalEntries === 0) {
+    return `<p style="font-size:13px;color:var(--txt-dim);">Aún no hay registros para mostrar un resumen.</p>`;
+  }
+
+  const cards = [
+    { label: "Sesiones totales", value: totalSessions },
+    { label: "Registros totales", value: totalEntries },
+    { label: "Volumen histórico", value: `${Math.round(totalVolume).toLocaleString()}` },
+    { label: "Más entrenado", value: mostTrainedEx ? mostTrainedEx.name : "—", small: true },
+  ];
+  return `<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+    ${cards.map((c) => `
+      <div class="card" style="padding:10px;text-align:center;">
+        <div style="font-size:11px;color:var(--txt-dim);">${c.label}</div>
+        <div style="font-size:${c.small ? "13px" : "18px"};font-weight:700;color:var(--accent);line-height:1.3;">${esc(c.value)}</div>
+      </div>
+    `).join("")}
+  </div>`;
+}
+
+function statsRenderWeeklyVolume() {
+  const wrap = document.getElementById("statsWeeklyVolumeArea");
+  const allLogs = Object.values(logs).flat();
+  if (allLogs.length === 0) {
+    wrap.innerHTML = `<p style="font-size:13px;color:var(--txt-dim);">Aún no hay historial suficiente.</p>`;
+    return;
+  }
+  const NUM_WEEKS = 10;
+  const vols = new Array(NUM_WEEKS).fill(0);
+  allLogs.forEach((l) => {
+    const w = statsWeeksAgo(l.date);
+    if (w >= 0 && w < NUM_WEEKS) vols[NUM_WEEKS - 1 - w] += (l.weight || 0) * (l.reps || 0);
+  });
+  wrap.innerHTML = `<div class="card"><canvas id="weeklyVolCanvas" height="140"></canvas></div>`;
+  destroyChart("weeklyVol");
+  const ctx = document.getElementById("weeklyVolCanvas").getContext("2d");
+  statsCharts.weeklyVol = new Chart(ctx, {
+    type: "bar",
+    data: {
+      labels: vols.map((_, i) => `${NUM_WEEKS - 1 - i}`),
+      datasets: [{ label: "Volumen total (peso × reps)", data: vols, backgroundColor: CHART_COLORS[2] }],
+    },
+    options: {
+      responsive: true,
+      plugins: { legend: { display: false } },
+      scales: {
+        x: { title: { display: true, text: "Semanas atrás", color: "#9A9EA6" }, ticks: { color: "#9A9EA6" }, grid: { display: false } },
+        y: { beginAtZero: true, ticks: { color: "#9A9EA6" }, grid: { color: "#2C3036" } },
+      },
+    },
+  });
+}
+
+function statsRenderPRTable() {
+  const wrap = document.getElementById("statsPRArea");
+  const exList = allExercisesFlat().filter((ex) => (logs[ex.id] || []).length > 0);
+  if (exList.length === 0) {
+    wrap.innerHTML = `<p style="font-size:13px;color:var(--txt-dim);">Aún no hay récords que mostrar.</p>`;
+    return;
+  }
+  const rows = exList.map((ex) => {
+    const entries = logs[ex.id];
+    let bestW = entries[0], bestE1 = entries[0];
+    entries.forEach((e) => {
+      if (e.weight > bestW.weight) bestW = e;
+      if (epley1RM(e.weight, e.reps) > epley1RM(bestE1.weight, bestE1.reps)) bestE1 = e;
+    });
+    return { name: ex.name, dayLabel: ex.dayLabel, bestW, bestE1RM: epley1RM(bestE1.weight, bestE1.reps) };
+  });
+  wrap.innerHTML = `
+    <div style="display:flex;flex-direction:column;gap:6px;">
+      ${rows.map((r) => `
+        <div class="card" style="padding:10px;">
+          <div style="font-size:12.5px;font-weight:600;margin-bottom:4px;">${esc(r.name)}</div>
+          <div style="display:flex;justify-content:space-between;font-size:11.5px;color:var(--txt-dim);">
+            <span>${esc(r.dayLabel)}</span>
+            <span style="color:var(--accent);font-weight:700;">PR: ${r.bestW.weight}${r.bestW.unit} × ${r.bestW.reps}r &nbsp;·&nbsp; 1RM est: ${r.bestE1RM.toFixed(1)}${r.bestW.unit}</span>
+          </div>
+        </div>
+      `).join("")}
+    </div>
+  `;
+}
+
 function statsRender() {
   const body = document.getElementById("statsBody");
   const exList = allExercisesFlat();
   const defaultId = statsRender._lastEx || exList[0]?.id;
   body.innerHTML = `
-    <div style="font-size:13px;font-weight:700;color:var(--accent);margin-bottom:6px;">Progresión por ejercicio</div>
+    <div style="font-size:13px;font-weight:700;color:var(--accent);margin-bottom:6px;">Resumen general</div>
+    ${statsOverviewHTML()}
+
+    <div style="font-size:13px;font-weight:700;color:var(--accent);margin:20px 0 6px;">Volumen semanal total (todos los ejercicios)</div>
+    <div id="statsWeeklyVolumeArea"></div>
+
+    <div style="font-size:13px;font-weight:700;color:var(--accent);margin:20px 0 6px;">Progresión por ejercicio</div>
     ${statsBuildExerciseSelect(defaultId)}
     <div id="statsExerciseArea"></div>
 
@@ -649,15 +914,20 @@ function statsRender() {
 
     <div style="font-size:13px;font-weight:700;color:var(--accent);margin:20px 0 6px;">Volumen histórico por día de rutina</div>
     <div id="statsVolumeArea"></div>
+
+    <div style="font-size:13px;font-weight:700;color:var(--accent);margin:20px 0 6px;">Récords personales (todos los ejercicios)</div>
+    <div id="statsPRArea"></div>
   `;
   document.getElementById("statsExSelect").addEventListener("change", (e) => {
     statsRender._lastEx = e.target.value;
     statsRenderExerciseChart._filter = null;
     statsRenderExerciseChart(e.target.value);
   });
+  statsRenderWeeklyVolume();
   if (defaultId) statsRenderExerciseChart(defaultId);
   statsRenderConsistency();
   statsRenderVolumePerDay();
+  statsRenderPRTable();
 }
 
 document.getElementById("btnStats").addEventListener("click", () => {
@@ -890,3 +1160,11 @@ if ("serviceWorker" in navigator) {
 
 // ---------- Initial render ----------
 render();
+
+// ---------- Try a silent background sync from Sheets on load (no popup if already granted) ----------
+if (gsClientId && gsSpreadsheetId && window.google) {
+  setTimeout(async () => {
+    const res = await gsPullAll(true);
+    if (res && res.pulled > 0) showToast(`${res.pulled} registros nuevos traídos de Sheets`);
+  }, 800);
+}
