@@ -254,9 +254,11 @@ function wireCard(ex) {
     btn.addEventListener("click", () => {
       const row = btn.closest("[data-log-id]");
       const logId = row.dataset.logId;
+      const entryToDelete = (logs[ex.id] || []).find((l) => l.id === logId);
       logs[ex.id] = (logs[ex.id] || []).filter((l) => l.id !== logId);
       saveLogs();
       render();
+      if (entryToDelete) gsDeleteRow(routine[activeDay].label, ex.name, entryToDelete);
     });
   });
 }
@@ -484,6 +486,54 @@ async function gsLinkExistingSheet(idOrUrl) {
   }
   await gsPullAll();
   showToast("Hoja vinculada y datos traídos");
+}
+
+// ---------- Delete a row in Sheets matching a locally-deleted entry ----------
+async function gsDeleteRow(dayLabel, exName, entry) {
+  if (!gsClientId || !gsSpreadsheetId) return; // nothing configured, only local matters
+  if (!entry.synced) return; // was never pushed to Sheets, nothing to remove there
+  try {
+    if (!gsAccessToken) await gsRequestToken("");
+    const metaRes = await gsFetch(
+      `https://sheets.googleapis.com/v4/spreadsheets/${gsSpreadsheetId}?fields=sheets.properties`
+    );
+    if (metaRes.status === 404) { await gsRecreateAfterDeletion(); return; }
+    if (!metaRes.ok) return;
+    const meta = await metaRes.json();
+    const sheetMeta = (meta.sheets || []).find((s) => s.properties.title === dayLabel);
+    if (!sheetMeta) return;
+    const sheetId = sheetMeta.properties.sheetId;
+
+    const valRes = await gsFetch(
+      `https://sheets.googleapis.com/v4/spreadsheets/${gsSpreadsheetId}/values/${encodeURIComponent(dayLabel)}!A2:G100000`
+    );
+    if (!valRes.ok) return;
+    const data = await valRes.json();
+    const rows = data.values || [];
+    const idx = rows.findIndex((row) => {
+      const [name, date, weight, unit, reps, equip, notes] = row;
+      return name === exName && date === entry.date &&
+        parseFloat(weight) === entry.weight && (unit || "lb") === entry.unit &&
+        parseInt(reps, 10) === entry.reps && (equip || "") === (entry.equip || "") &&
+        (notes || "") === (entry.notes || "");
+    });
+    if (idx === -1) return; // couldn't find a matching row, nothing to delete
+
+    const sheetRowIndex = idx + 1; // +1 because row 0 (0-based) is the header
+    await gsFetch(`https://sheets.googleapis.com/v4/spreadsheets/${gsSpreadsheetId}:batchUpdate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        requests: [{
+          deleteDimension: {
+            range: { sheetId, dimension: "ROWS", startIndex: sheetRowIndex, endIndex: sheetRowIndex + 1 },
+          },
+        }],
+      }),
+    });
+  } catch (e) {
+    // silent — the local delete already succeeded, this is just best-effort cleanup in Sheets
+  }
 }
 
 async function gsPullAll(silent) {
