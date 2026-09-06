@@ -547,6 +547,11 @@ function gsRenderModal() {
       <button class="hist-btn" id="gsLinkBtn" style="width:100%;justify-content:center;margin-bottom:8px;">Vincular y traer datos</button>
     </div>
     <button class="hist-btn" id="gsResetBtn" style="width:100%;justify-content:center;margin-bottom:8px;">Cambiar Client ID</button>
+    <div style="border-top:1px solid var(--line);margin:10px 0;padding-top:10px;">
+      <p style="font-size:12px;color:var(--danger);font-weight:700;margin-bottom:6px;">Zona de reinicio</p>
+      <button class="hist-btn" id="gsClearLocalBtn" style="width:100%;justify-content:center;margin-bottom:8px;border-color:var(--danger);color:var(--danger);">Borrar historial local (este dispositivo)</button>
+      ${connected && gsSpreadsheetId ? `<button class="hist-btn" id="gsClearSheetBtn" style="width:100%;justify-content:center;border-color:var(--danger);color:var(--danger);">Borrar también los datos en Google Sheets</button>` : ""}
+    </div>
     <button class="hist-btn" id="gsCloseModal" style="width:100%;justify-content:center;">Cerrar</button>
   `;
   document.getElementById("gsConnectBtn").addEventListener("click", async () => {
@@ -590,6 +595,33 @@ function gsRenderModal() {
     localStorage.removeItem(GS_SHEET_ID_KEY);
     gsRenderModal();
     gsUpdateStatus();
+  });
+  const clearLocalBtn = document.getElementById("gsClearLocalBtn");
+  if (clearLocalBtn) clearLocalBtn.addEventListener("click", () => {
+    if (!confirm("¿Borrar TODO el historial guardado en este dispositivo? Esto no se puede deshacer. (La rutina/ejercicios no se borran, solo los registros de peso/reps)")) return;
+    logs = {};
+    saveLogs();
+    render();
+    gsUpdateStatus();
+    gsRenderModal();
+    showToast("Historial local borrado");
+  });
+  const clearSheetBtn = document.getElementById("gsClearSheetBtn");
+  if (clearSheetBtn) clearSheetBtn.addEventListener("click", async () => {
+    if (!confirm("¿Borrar TODOS los datos en tu Google Sheet (se mantienen los encabezados)? Esto no se puede deshacer.")) return;
+    if (!confirm("Confirma de nuevo: esto borra los datos en la hoja de Google, no solo en este dispositivo.")) return;
+    try {
+      for (const day of Object.values(routine)) {
+        await gsFetch(
+          `https://sheets.googleapis.com/v4/spreadsheets/${gsSpreadsheetId}/values/${encodeURIComponent(day.label)}!A2:G100000:clear`,
+          { method: "POST" }
+        );
+      }
+      showToast("Datos borrados en Google Sheets");
+    } catch (e) {
+      showToast("No se pudo borrar en Sheets");
+    }
+    gsRenderModal();
   });
   document.getElementById("gsCloseModal").addEventListener("click", gsCloseModal);
 }
