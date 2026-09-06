@@ -270,6 +270,8 @@ let gsAccessToken = null;
 let gsTokenClient = null;
 let gsClientId = localStorage.getItem(GS_CLIENT_ID_KEY) || "";
 let gsSpreadsheetId = localStorage.getItem(GS_SHEET_ID_KEY) || "";
+let gsTokenPromise = null; // shared in-flight request, prevents concurrent calls from clobbering each other
+let gsCreatePromise = null; // same idea for spreadsheet creation
 
 function gsUpdateStatus() {
   const el = document.getElementById("sheetsStatus");
@@ -299,16 +301,21 @@ function gsInitTokenClient() {
 }
 
 function gsRequestToken(promptMode) {
-  return new Promise((resolve, reject) => {
+  // If a token request is already in flight, everyone shares that same promise
+  // instead of firing a new requestAccessToken() call that overwrites the pending one.
+  if (gsTokenPromise) return gsTokenPromise;
+  gsTokenPromise = new Promise((resolve, reject) => {
     if (!gsTokenClient) gsTokenClient = gsInitTokenClient();
-    if (!gsTokenClient) { reject(new Error("no-client")); return; }
+    if (!gsTokenClient) { gsTokenPromise = null; reject(new Error("no-client")); return; }
     gsTokenClient.callback = (resp) => {
+      gsTokenPromise = null;
       if (resp.error) { reject(resp); return; }
       gsAccessToken = resp.access_token;
       resolve(gsAccessToken);
     };
     gsTokenClient.requestAccessToken({ prompt: promptMode });
   });
+  return gsTokenPromise;
 }
 
 async function gsFetch(url, options = {}) {
@@ -329,40 +336,70 @@ async function gsFetch(url, options = {}) {
 }
 
 async function gsCreateSpreadsheet() {
-  const body = {
-    properties: { title: "Bitácora de Rutina" },
-    sheets: Object.values(routine).map((d) => ({ properties: { title: d.label } })),
-  };
-  const res = await gsFetch("https://sheets.googleapis.com/v4/spreadsheets", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) throw new Error("create-failed");
-  const data = await res.json();
-  gsSpreadsheetId = data.spreadsheetId;
-  localStorage.setItem(GS_SHEET_ID_KEY, gsSpreadsheetId);
+  // Guard against two concurrent calls both creating a spreadsheet (same race as the token bug)
+  if (gsCreatePromise) return gsCreatePromise;
+  gsCreatePromise = (async () => {
+    const body = {
+      properties: { title: "Bitácora de Rutina" },
+      sheets: Object.values(routine).map((d) => ({ properties: { title: d.label } })),
+    };
+    const res = await gsFetch("https://sheets.googleapis.com/v4/spreadsheets", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) throw new Error("create-failed");
+    const data = await res.json();
+    gsSpreadsheetId = data.spreadsheetId;
+    localStorage.setItem(GS_SHEET_ID_KEY, gsSpreadsheetId);
 
-  // write header row to each sheet
-  for (const day of Object.values(routine)) {
-    await gsFetch(
-      `https://sheets.googleapis.com/v4/spreadsheets/${gsSpreadsheetId}/values/${encodeURIComponent(day.label)}!A1:G1?valueInputOption=USER_ENTERED`,
-      {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ values: [["Ejercicio", "Fecha", "Peso", "Unidad", "Reps", "Equipo", "Notas"]] }),
-      }
-    );
+    // write header row to each sheet
+    for (const day of Object.values(routine)) {
+      await gsFetch(
+        `https://sheets.googleapis.com/v4/spreadsheets/${gsSpreadsheetId}/values/${encodeURIComponent(day.label)}!A1:G1?valueInputOption=USER_ENTERED`,
+        {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ values: [["Ejercicio", "Fecha", "Peso", "Unidad", "Reps", "Equipo", "Notas"]] }),
+        }
+      );
+    }
+    return gsSpreadsheetId;
+  })();
+  try {
+    return await gsCreatePromise;
+  } finally {
+    gsCreatePromise = null;
   }
-  return gsSpreadsheetId;
+}
+
+// If the linked spreadsheet was deleted externally (Drive shows "file has been deleted"),
+// Google's API replies 404. This wrapper detects that automatically, forgets the stale ID,
+// marks local history as pending again, creates a fresh spreadsheet, and retries once —
+// no manual "forget sheet" step needed.
+async function gsRecreateAfterDeletion() {
+  gsSpreadsheetId = "";
+  localStorage.removeItem(GS_SHEET_ID_KEY);
+  Object.values(logs).forEach((arr) => arr.forEach((l) => { l.synced = false; }));
+  saveLogs();
+  await gsCreateSpreadsheet();
+}
+
+async function gsFetchWithAutoRecreate(buildUrl, options) {
+  if (!gsSpreadsheetId) await gsCreateSpreadsheet();
+  let res = await gsFetch(buildUrl(gsSpreadsheetId), options);
+  if (res.status === 404) {
+    await gsRecreateAfterDeletion();
+    res = await gsFetch(buildUrl(gsSpreadsheetId), options);
+  }
+  return res;
 }
 
 async function gsAppendRow(dayLabel, exId, entryId, rowValues) {
   if (!gsClientId) return; // not configured, silently skip
   try {
-    if (!gsSpreadsheetId) await gsCreateSpreadsheet();
-    await gsFetch(
-      `https://sheets.googleapis.com/v4/spreadsheets/${gsSpreadsheetId}/values/${encodeURIComponent(dayLabel)}!A:G:append?valueInputOption=USER_ENTERED`,
+    await gsFetchWithAutoRecreate(
+      (id) => `https://sheets.googleapis.com/v4/spreadsheets/${id}/values/${encodeURIComponent(dayLabel)}!A:G:append?valueInputOption=USER_ENTERED`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -406,8 +443,8 @@ async function gsSyncPending() {
   }
   for (const { day, ex, entry } of pending) {
     try {
-      await gsFetch(
-        `https://sheets.googleapis.com/v4/spreadsheets/${gsSpreadsheetId}/values/${encodeURIComponent(day.label)}!A:G:append?valueInputOption=USER_ENTERED`,
+      await gsFetchWithAutoRecreate(
+        (id) => `https://sheets.googleapis.com/v4/spreadsheets/${id}/values/${encodeURIComponent(day.label)}!A:G:append?valueInputOption=USER_ENTERED`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -459,9 +496,16 @@ async function gsPullAll(silent) {
   }
   let pulled = 0;
   try {
-    const metaRes = await gsFetch(
+    let metaRes = await gsFetch(
       `https://sheets.googleapis.com/v4/spreadsheets/${gsSpreadsheetId}?fields=sheets.properties.title`
     );
+    if (metaRes.status === 404) {
+      // the linked spreadsheet was deleted externally — heal automatically and stop this pull
+      // (a brand-new sheet has nothing to pull; future writes will populate it)
+      await gsRecreateAfterDeletion();
+      if (!silent) showToast("La hoja vinculada ya no existía — se creó una nueva automáticamente");
+      return { pulled: 0 };
+    }
     if (!metaRes.ok) throw new Error("meta-failed");
     const meta = await metaRes.json();
     const sheetTitles = (meta.sheets || []).map((s) => s.properties.title);
