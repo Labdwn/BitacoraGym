@@ -18,12 +18,12 @@ const DEFAULT_ROUTINE = {
     label: "Día 2",
     focus: "Lower A — Isquio/glúteo prioridad",
     exercises: [
-      { id: "d2e1", name: "Peso muerto rumano (RDL)", target: "4x6-8", rest: "2-3 min", equip: "Barra libre" },
-      { id: "d2e2", name: "Sentadilla hack (secundario)", target: "3x10-12", rest: "2 min", equip: "Máquina hack" },
+      { id: "d2e1", name: "Peso muerto rumano (RDL)", target: "4x6-8", rest: "2-3 min", equip: "Barra libre", canonicalId: "cx_rdl" },
+      { id: "d2e2", name: "Sentadilla hack (secundario)", target: "3x10-12", rest: "2 min", equip: "Máquina hack", canonicalId: "cx_sentadilla_hack" },
       { id: "d2e3", name: "Hip thrust", target: "3x10-12", rest: "2 min", equip: "Barra / Máquina" },
       { id: "d2e4", name: "Curl femoral", target: "3x12-15", rest: "90 seg", equip: "Máquina" },
       { id: "d2e5", name: "Elevación de talones de pie", target: "3x15", rest: "60 seg", equip: "Máquina" },
-      { id: "d2e6", name: "Abdomen en banco declinado", target: "3x10-15", rest: "60 seg", equip: "Banco declinado" },
+      { id: "d2e6", name: "Abdomen en banco declinado", target: "3x10-15", rest: "60 seg", equip: "Banco declinado", canonicalId: "cx_abdomen_declinado" },
     ],
   },
   dia3: {
@@ -44,24 +44,29 @@ const DEFAULT_ROUTINE = {
     label: "Día 4",
     focus: "Lower B — Cuádriceps prioridad + isquio secundario",
     exercises: [
-      { id: "d4e1", name: "Sentadilla hack", target: "4x6-8", rest: "2-3 min", equip: "Máquina hack" },
-      { id: "d4e2", name: "Peso muerto rumano c/mancuernas (secundario)", target: "3x10-12", rest: "2 min", equip: "Mancuernas" },
+      { id: "d4e1", name: "Sentadilla hack", target: "4x6-8", rest: "2-3 min", equip: "Máquina hack", canonicalId: "cx_sentadilla_hack" },
+      { id: "d4e2", name: "Peso muerto rumano c/mancuernas (secundario)", target: "3x10-12", rest: "2 min", equip: "Mancuernas", canonicalId: "cx_rdl" },
       { id: "d4e3", name: "Prensa de piernas (pies altos)", target: "3x10-12", rest: "90 seg", equip: "Máquina prensa" },
       { id: "d4e4", name: "Extensión de cuádriceps", target: "3x12-15", rest: "90 seg", equip: "Máquina" },
       { id: "d4e5", name: "Elevación de talones sentado", target: "4x12-15", rest: "60 seg", equip: "Máquina" },
-      { id: "d4e6", name: "Abdomen en banco declinado", target: "3x10-15", rest: "60 seg", equip: "Banco declinado" },
+      { id: "d4e6", name: "Abdomen en banco declinado", target: "3x10-15", rest: "60 seg", equip: "Banco declinado", canonicalId: "cx_abdomen_declinado" },
     ],
   },
 };
 
 const RK = "bitacora_rutina_v1";
 const LK = "bitacora_logs_v1";
+const BWK = "bitacora_bodyweight_v1";
 
 let routine = loadJSON(RK, DEFAULT_ROUTINE);
 let logs = loadJSON(LK, {});
+let bodyweightLog = loadJSON(BWK, []); // [{id, date, weight, unit, notes, synced}]
 let activeDay = Object.keys(routine)[0];
+migrateCanonicalLogs(); // one-time: merges old per-day history into shared canonical keys
 let editMode = false;
 let expanded = {};
+let pendingDeleteIds = new Set(); // log ids hidden while their undo window is open
+let undoTimers = {}; // logId -> {timeout, exId, exName, entry}
 
 function sortByDateAsc(arr) {
   return arr.slice().sort((a, b) => a.date.localeCompare(b.date) || a.id.localeCompare(b.id));
@@ -84,7 +89,41 @@ function saveRoutine() {
 function saveLogs() {
   try { localStorage.setItem(LK, JSON.stringify(logs)); } catch (e) { showToast("No se pudo guardar"); }
 }
+function saveBodyweight() {
+  try { localStorage.setItem(BWK, JSON.stringify(bodyweightLog)); } catch (e) { showToast("No se pudo guardar"); }
+}
 function todayISO() { return new Date().toISOString().slice(0, 10); }
+// Some exercises are the literal same movement done on two different days (e.g. "Sentadilla
+// hack" as primary on Day 4 and secondary on Day 2). Those share a canonicalId so their
+// weight/reps history and PRs are tracked as ONE continuous progression, not two separate ones.
+function logKey(ex) { return ex.canonicalId || ex.id; }
+
+// One-time migration: some exercises used to have separate per-day histories (e.g. "Sentadilla
+// hack" logged under a Day 2 id and a Day 4 id) that now share one canonicalId. Without this,
+// that old history would look like it "disappeared" since the app now reads from the shared key.
+function migrateCanonicalLogs() {
+  const MIGRATION_FLAG = "bitacora_canonical_migration_v1";
+  if (localStorage.getItem(MIGRATION_FLAG)) return;
+  let changed = false;
+  Object.values(routine).forEach((day) => {
+    day.exercises.forEach((ex) => {
+      const key = logKey(ex);
+      if (key === ex.id) return; // not a shared exercise, nothing to migrate
+      const oldArr = logs[ex.id];
+      if (!oldArr || oldArr.length === 0) return;
+      const target = logs[key] || [];
+      oldArr.forEach((entry) => {
+        const dup = target.some((t) => t.date === entry.date && t.weight === entry.weight && t.unit === entry.unit && t.reps === entry.reps && (t.equip || "") === (entry.equip || ""));
+        if (!dup) target.push(entry.dayLabel ? entry : { ...entry, dayLabel: day.label });
+      });
+      logs[key] = target;
+      delete logs[ex.id];
+      changed = true;
+    });
+  });
+  if (changed) saveLogs();
+  localStorage.setItem(MIGRATION_FLAG, "1");
+}
 function fmtDate(iso) { const [y, m, d] = iso.split("-"); return `${d}/${m}/${y.slice(2)}`; }
 function showToast(msg) {
   const t = document.getElementById("toast");
@@ -93,6 +132,102 @@ function showToast(msg) {
   clearTimeout(showToast._tm);
   showToast._tm = setTimeout(() => t.classList.add("hidden"), 2000);
 }
+
+// ---------- Undo-able delete: hides the row instantly, finalizes after a grace window ----------
+function scheduleUndoableDelete(exId, logId, exName) {
+  const entry = (logs[exId] || []).find((l) => l.id === logId);
+  if (!entry) return;
+  pendingDeleteIds.add(logId);
+  render();
+
+  const bar = document.getElementById("undoBar");
+  bar.innerHTML = `<span>Registro eliminado</span><button class="undo-btn" id="undoBtnAction">Deshacer</button>`;
+  bar.classList.remove("hidden");
+  document.getElementById("undoBtnAction").addEventListener("click", () => {
+    clearTimeout(undoTimers[logId]?.timeout);
+    delete undoTimers[logId];
+    pendingDeleteIds.delete(logId);
+    bar.classList.add("hidden");
+    render();
+  });
+
+  const timeout = setTimeout(() => {
+    pendingDeleteIds.delete(logId);
+    logs[exId] = (logs[exId] || []).filter((l) => l.id !== logId);
+    saveLogs();
+    bar.classList.add("hidden");
+    render();
+    gsDeleteRow(entry.dayLabel || routine[activeDay].label, exName, entry);
+    delete undoTimers[logId];
+  }, 4000);
+  undoTimers[logId] = { timeout, exId, exName, entry };
+}
+
+// ---------- Rest timer ----------
+function parseRestSeconds(restStr) {
+  const nums = String(restStr || "").match(/\d+(\.\d+)?/g);
+  if (!nums) return 90;
+  const vals = nums.map(Number);
+  const avg = vals.reduce((a, b) => a + b, 0) / vals.length;
+  const isMinutes = /min/i.test(restStr);
+  return Math.round(avg * (isMinutes ? 60 : 1));
+}
+
+let restTimerInterval = null;
+function startRestTimer(restStr, label) {
+  clearInterval(restTimerInterval);
+  let remaining = parseRestSeconds(restStr);
+  const bar = document.getElementById("restTimerBar");
+  bar.classList.remove("hidden");
+
+  const render_ = () => {
+    const m = Math.floor(remaining / 60);
+    const s = remaining % 60;
+    bar.innerHTML = `
+      <div>
+        <div class="rest-timer-label">Descanso — ${esc(label)}</div>
+        <div class="rest-timer-time">${m}:${String(s).padStart(2, "0")}</div>
+      </div>
+      <div class="rest-timer-actions">
+        <button class="rest-timer-btn" id="restAdd15">+15s</button>
+        <button class="rest-timer-btn" id="restSkip">Saltar</button>
+      </div>
+    `;
+    document.getElementById("restAdd15").addEventListener("click", () => { remaining += 15; render_(); });
+    document.getElementById("restSkip").addEventListener("click", stopRestTimer);
+  };
+  render_();
+
+  restTimerInterval = setInterval(() => {
+    remaining--;
+    if (remaining <= 0) {
+      playBeep();
+      if (navigator.vibrate) navigator.vibrate([200, 100, 200]);
+      stopRestTimer();
+      return;
+    }
+    render_();
+  }, 1000);
+}
+function stopRestTimer() {
+  clearInterval(restTimerInterval);
+  document.getElementById("restTimerBar").classList.add("hidden");
+}
+function playBeep() {
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.frequency.value = 880;
+    gain.gain.setValueAtTime(0.2, ctx.currentTime);
+    osc.start();
+    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.6);
+    osc.stop(ctx.currentTime + 0.6);
+  } catch (e) { /* audio not available, silently skip */ }
+}
+
 function esc(s) {
   return String(s == null ? "" : s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
@@ -113,26 +248,33 @@ function render() {
   renderTabs();
   const main = document.getElementById("main");
   const day = routine[activeDay];
-  main.innerHTML = day.exercises.map((ex) => cardHTML(ex)).join("") +
+  main.innerHTML = day.exercises.map((ex, i) => cardHTML(ex, i === 0, i === day.exercises.length - 1)).join("") +
     (editMode ? `<button class="add-ex-btn" id="addExBtn">+ Agregar ejercicio</button>` : "");
   document.getElementById("btnEdit").classList.toggle("active", editMode);
   gsUpdateStatus();
 
   // wire events
-  day.exercises.forEach((ex) => wireCard(ex));
+  day.exercises.forEach((ex) => wireCard(ex, day.exercises));
   if (editMode) {
     document.getElementById("addExBtn").addEventListener("click", () => {
       const newId = `${activeDay}_${Date.now()}`;
       routine[activeDay].exercises.push({ id: newId, name: "Nuevo ejercicio", target: "3x10-12", rest: "90 seg", equip: "" });
       saveRoutine();
+      scheduleRoutineSync();
       render();
     });
   }
 }
 
-function cardHTML(ex) {
-  const entries = sortByDateDesc(logs[ex.id] || []);
+function cardHTML(ex, isFirst, isLast) {
+  const entries = sortByDateDesc(logs[logKey(ex)] || []).filter((l) => !pendingDeleteIds.has(l.id));
   const last = entries[0];
+  let prId = null;
+  if (entries.length > 0) {
+    let best = entries[0];
+    entries.forEach((e) => { if (e.weight > best.weight) best = e; });
+    prId = best.id;
+  }
   if (editMode) {
     return `
     <div class="card" data-id="${ex.id}">
@@ -144,6 +286,10 @@ function cardHTML(ex) {
             <input class="edit-input-small" data-field="rest" value="${esc(ex.rest)}" placeholder="2 min">
           </div>
           <input class="edit-input-small" data-field="equip" value="${esc(ex.equip)}" placeholder="Equipo prioritario" style="margin-top:6px;width:100%;">
+        </div>
+        <div style="display:flex;flex-direction:column;align-items:center;">
+          <button class="order-btn" data-action="move-up" ${isFirst ? "disabled style='opacity:0.25;'" : ""}>&#9650;</button>
+          <button class="order-btn" data-action="move-down" ${isLast ? "disabled style='opacity:0.25;'" : ""}>&#9660;</button>
         </div>
         <button class="remove-btn" data-action="remove">&#128465;</button>
       </div>
@@ -163,17 +309,24 @@ function cardHTML(ex) {
     </div>
     <div class="card-actions">
       <button class="log-btn" data-action="toggle-form">+ Registrar</button>
+      <button class="timer-icon-btn" data-action="start-timer">&#9202; Descanso</button>
       ${entries.length > 0 ? `<button class="hist-btn" data-action="toggle-hist">${entries.length} registro${entries.length !== 1 ? "s" : ""} ${expanded[ex.id] ? "&#9650;" : "&#9660;"}</button>` : ""}
     </div>
     <div class="form hidden" data-role="form">
       <input class="input-full" type="date" data-field="date" value="${todayISO()}" style="margin-bottom:2px;">
       <div class="form-row">
+        <button class="stepper-btn" data-step="weight" data-dir="-1">&minus;</button>
         <input class="input" type="number" inputmode="decimal" placeholder="Peso" data-field="weight" value="${last ? last.weight : ""}">
+        <button class="stepper-btn" data-step="weight" data-dir="1">&plus;</button>
         <div class="unit-toggle">
           <button class="unit-btn ${(!last || last.unit === "lb") ? "active" : ""}" data-unit="lb">lb</button>
           <button class="unit-btn ${(last && last.unit === "kg") ? "active" : ""}" data-unit="kg">kg</button>
         </div>
+      </div>
+      <div class="form-row">
+        <button class="stepper-btn" data-step="reps" data-dir="-1">&minus;</button>
         <input class="input" type="number" inputmode="numeric" placeholder="Reps" data-field="reps" value="${last ? last.reps : ""}">
+        <button class="stepper-btn" data-step="reps" data-dir="1">&plus;</button>
       </div>
       <input class="input-full" placeholder="Equipo usado (opcional)" data-field="equip">
       <input class="input-full" placeholder="Notas (opcional)" data-field="notes">
@@ -183,7 +336,7 @@ function cardHTML(ex) {
       ${entries.map((l) => `
         <div class="hist-row" data-log-id="${l.id}">
           <span class="hist-date">${fmtDate(l.date)}</span>
-          <span class="hist-val">${l.weight}${l.unit} × ${l.reps}r</span>
+          <span class="hist-val ${l.id === prId ? "pr-badge" : ""}">${l.id === prId ? "&#127942; " : ""}${l.weight}${l.unit} × ${l.reps}r</span>
           ${l.equip ? `<span class="hist-equip">${esc(l.equip)}</span>` : "<span></span>"}
           <button class="hist-del" data-action="del-log">&#128465;</button>
         </div>
@@ -192,7 +345,7 @@ function cardHTML(ex) {
   </div>`;
 }
 
-function wireCard(ex) {
+function wireCard(ex, dayExercises) {
   const card = document.querySelector(`.card[data-id="${ex.id}"]`);
   if (!card) return;
 
@@ -201,13 +354,27 @@ function wireCard(ex) {
       inp.addEventListener("input", () => {
         ex[inp.dataset.field] = inp.value;
         saveRoutine();
+        scheduleRoutineSync();
       });
     });
     const rm = card.querySelector('[data-action="remove"]');
     if (rm) rm.addEventListener("click", () => {
       routine[activeDay].exercises = routine[activeDay].exercises.filter((e) => e.id !== ex.id);
       saveRoutine();
+      scheduleRoutineSync();
       render();
+    });
+    const moveUp = card.querySelector('[data-action="move-up"]');
+    if (moveUp) moveUp.addEventListener("click", () => {
+      const arr = routine[activeDay].exercises;
+      const idx = arr.findIndex((e) => e.id === ex.id);
+      if (idx > 0) { [arr[idx - 1], arr[idx]] = [arr[idx], arr[idx - 1]]; saveRoutine(); scheduleRoutineSync(); render(); }
+    });
+    const moveDown = card.querySelector('[data-action="move-down"]');
+    if (moveDown) moveDown.addEventListener("click", () => {
+      const arr = routine[activeDay].exercises;
+      const idx = arr.findIndex((e) => e.id === ex.id);
+      if (idx < arr.length - 1) { [arr[idx + 1], arr[idx]] = [arr[idx], arr[idx + 1]]; saveRoutine(); scheduleRoutineSync(); render(); }
     });
     return;
   }
@@ -218,6 +385,9 @@ function wireCard(ex) {
     formEl.classList.toggle("hidden");
     toggleBtn.innerHTML = formEl.classList.contains("hidden") ? "+ Registrar" : "&times; Cancelar";
   });
+
+  const timerBtn = card.querySelector('[data-action="start-timer"]');
+  if (timerBtn) timerBtn.addEventListener("click", () => startRestTimer(ex.rest, ex.name));
 
   const histBtn = card.querySelector('[data-action="toggle-hist"]');
   if (histBtn) histBtn.addEventListener("click", () => {
@@ -233,6 +403,19 @@ function wireCard(ex) {
     });
   });
 
+  formEl.querySelectorAll(".stepper-btn").forEach((sb) => {
+    sb.addEventListener("click", () => {
+      const field = sb.dataset.step;
+      const dir = parseInt(sb.dataset.dir, 10);
+      const input = formEl.querySelector(`[data-field="${field}"]`);
+      const unit = formEl.querySelector(".unit-btn.active")?.dataset.unit || "lb";
+      const step = field === "weight" ? (unit === "kg" ? 2.5 : 5) : 1;
+      const cur = parseFloat(input.value) || 0;
+      const next = Math.max(0, cur + dir * step);
+      input.value = field === "weight" ? (Math.round(next * 100) / 100) : Math.round(next);
+    });
+  });
+
   const saveBtn = card.querySelector('[data-action="save-log"]');
   if (saveBtn) saveBtn.addEventListener("click", () => {
     const weight = formEl.querySelector('[data-field="weight"]').value;
@@ -242,23 +425,27 @@ function wireCard(ex) {
     const dateVal = formEl.querySelector('[data-field="date"]').value || todayISO();
     const unit = formEl.querySelector(".unit-btn.active")?.dataset.unit || "lb";
     if (!weight || !reps) { showToast("Falta peso o reps"); return; }
-    const entry = { id: `${Date.now()}`, date: dateVal, weight: parseFloat(weight), unit, reps: parseInt(reps, 10), equip: equip.trim(), notes: notes.trim(), synced: false };
-    logs[ex.id] = [entry, ...(logs[ex.id] || [])];
+    const weightNum = parseFloat(weight);
+
+    // PR detection: compare against previous best (before adding this entry)
+    const key = logKey(ex);
+    const priorEntries = logs[key] || [];
+    const priorMax = priorEntries.reduce((max, l) => Math.max(max, l.weight), 0);
+    const isNewPR = priorEntries.length > 0 && weightNum > priorMax;
+
+    const entry = { id: `${Date.now()}`, date: dateVal, weight: weightNum, unit, reps: parseInt(reps, 10), equip: equip.trim(), notes: notes.trim(), synced: false, dayLabel: routine[activeDay].label };
+    logs[key] = [entry, ...priorEntries];
     saveLogs();
-    showToast("Registrado");
+    showToast(isNewPR ? "🏆 ¡Nuevo PR de peso!" : "Registrado");
     render();
-    gsAppendRow(routine[activeDay].label, ex.id, entry.id, [ex.name, entry.date, entry.weight, entry.unit, entry.reps, entry.equip, entry.notes]);
+    gsAppendRow(routine[activeDay].label, key, entry.id, [ex.name, entry.date, entry.weight, entry.unit, entry.reps, entry.equip, entry.notes]);
   });
 
   card.querySelectorAll('[data-action="del-log"]').forEach((btn) => {
     btn.addEventListener("click", () => {
       const row = btn.closest("[data-log-id]");
       const logId = row.dataset.logId;
-      const entryToDelete = (logs[ex.id] || []).find((l) => l.id === logId);
-      logs[ex.id] = (logs[ex.id] || []).filter((l) => l.id !== logId);
-      saveLogs();
-      render();
-      if (entryToDelete) gsDeleteRow(routine[activeDay].label, ex.name, entryToDelete);
+      scheduleUndoableDelete(logKey(ex), logId, ex.name);
     });
   });
 }
@@ -267,6 +454,8 @@ function wireCard(ex) {
 const GS_CLIENT_ID_KEY = "bitacora_gs_client_id";
 const GS_SHEET_ID_KEY = "bitacora_gs_sheet_id";
 const GS_SCOPE = "https://www.googleapis.com/auth/spreadsheets";
+const GS_ROUTINE_SHEET = "Rutina (estructura)";
+const GS_BW_SHEET = "Peso corporal";
 
 let gsAccessToken = null;
 let gsTokenClient = null;
@@ -275,13 +464,27 @@ let gsSpreadsheetId = localStorage.getItem(GS_SHEET_ID_KEY) || "";
 let gsTokenPromise = null; // shared in-flight request, prevents concurrent calls from clobbering each other
 let gsCreatePromise = null; // same idea for spreadsheet creation
 
+function gsRelativeSyncTime() {
+  if (!gsLastSyncAt) return null;
+  const mins = Math.floor((Date.now() - gsLastSyncAt.getTime()) / 60000);
+  if (mins < 1) return "justo ahora";
+  if (mins < 60) return `hace ${mins} min`;
+  const hrs = Math.floor(mins / 60);
+  return `hace ${hrs}h`;
+}
+
 function gsUpdateStatus() {
   const el = document.getElementById("sheetsStatus");
+  if (!el) return; // called before DOM ready in rare cases
   const pendingCount = Object.values(logs).reduce((sum, arr) => sum + arr.filter((l) => !l.synced).length, 0);
-  if (gsSpreadsheetId && gsAccessToken) {
+  if (gsInFlightCount > 0) {
+    el.textContent = "⟳ Sincronizando con Google Sheets...";
+    el.classList.remove("hidden");
+  } else if (gsSpreadsheetId && gsAccessToken) {
+    const syncTime = gsRelativeSyncTime();
     el.textContent = pendingCount > 0
-      ? `✓ Conectado a Google Sheets — ${pendingCount} pendiente${pendingCount !== 1 ? "s" : ""} por sincronizar`
-      : "✓ Conectado a Google Sheets — todo sincronizado";
+      ? `✓ Conectado — ${pendingCount} pendiente${pendingCount !== 1 ? "s" : ""} por sincronizar`
+      : `✓ Sincronizado${syncTime ? ` (${syncTime})` : ""}`;
     el.classList.remove("hidden");
   } else if (gsSpreadsheetId || pendingCount > 0) {
     el.textContent = pendingCount > 0
@@ -320,21 +523,32 @@ function gsRequestToken(promptMode) {
   return gsTokenPromise;
 }
 
+let gsInFlightCount = 0;
+let gsLastSyncAt = null;
+
 async function gsFetch(url, options = {}) {
-  if (!gsAccessToken) await gsRequestToken("");
-  let res = await fetch(url, {
-    ...options,
-    headers: { ...(options.headers || {}), Authorization: `Bearer ${gsAccessToken}` },
-  });
-  if (res.status === 401) {
-    // token expired, retry once with a fresh one
-    await gsRequestToken("");
-    res = await fetch(url, {
+  gsInFlightCount++;
+  gsUpdateStatus();
+  try {
+    if (!gsAccessToken) await gsRequestToken("");
+    let res = await fetch(url, {
       ...options,
       headers: { ...(options.headers || {}), Authorization: `Bearer ${gsAccessToken}` },
     });
+    if (res.status === 401) {
+      // token expired, retry once with a fresh one
+      await gsRequestToken("");
+      res = await fetch(url, {
+        ...options,
+        headers: { ...(options.headers || {}), Authorization: `Bearer ${gsAccessToken}` },
+      });
+    }
+    if (res.ok) gsLastSyncAt = new Date();
+    return res;
+  } finally {
+    gsInFlightCount--;
+    gsUpdateStatus();
   }
-  return res;
 }
 
 async function gsCreateSpreadsheet() {
@@ -343,7 +557,11 @@ async function gsCreateSpreadsheet() {
   gsCreatePromise = (async () => {
     const body = {
       properties: { title: "Bitácora de Rutina" },
-      sheets: Object.values(routine).map((d) => ({ properties: { title: d.label } })),
+      sheets: [
+        { properties: { title: GS_ROUTINE_SHEET } },
+        { properties: { title: GS_BW_SHEET } },
+        ...Object.values(routine).map((d) => ({ properties: { title: d.label } })),
+      ],
     };
     const res = await gsFetch("https://sheets.googleapis.com/v4/spreadsheets", {
       method: "POST",
@@ -355,7 +573,7 @@ async function gsCreateSpreadsheet() {
     gsSpreadsheetId = data.spreadsheetId;
     localStorage.setItem(GS_SHEET_ID_KEY, gsSpreadsheetId);
 
-    // write header row to each sheet
+    // write header row to each day's log sheet
     for (const day of Object.values(routine)) {
       await gsFetch(
         `https://sheets.googleapis.com/v4/spreadsheets/${gsSpreadsheetId}/values/${encodeURIComponent(day.label)}!A1:G1?valueInputOption=USER_ENTERED`,
@@ -366,6 +584,30 @@ async function gsCreateSpreadsheet() {
         }
       );
     }
+    // write header + current structure to the routine sheet
+    await gsFetch(
+      `https://sheets.googleapis.com/v4/spreadsheets/${gsSpreadsheetId}/values/${encodeURIComponent(GS_ROUTINE_SHEET)}!A1:E1?valueInputOption=USER_ENTERED`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ values: [["Día", "Ejercicio", "Series x Reps", "Descanso", "Equipo prioritario"]] }),
+      }
+    );
+    const structRows = [];
+    Object.values(routine).forEach((day) => {
+      day.exercises.forEach((ex) => { structRows.push([day.label, ex.name, ex.target, ex.rest, ex.equip || ""]); });
+    });
+    if (structRows.length > 0) {
+      await gsFetch(
+        `https://sheets.googleapis.com/v4/spreadsheets/${gsSpreadsheetId}/values/${encodeURIComponent(GS_ROUTINE_SHEET)}!A2:E100000:append?valueInputOption=USER_ENTERED`,
+        { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ values: structRows }) }
+      );
+    }
+    // write header row to the bodyweight sheet
+    await gsFetch(
+      `https://sheets.googleapis.com/v4/spreadsheets/${gsSpreadsheetId}/values/${encodeURIComponent(GS_BW_SHEET)}!A1:D1?valueInputOption=USER_ENTERED`,
+      { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ values: [["Fecha", "Peso", "Unidad", "Notas"]] }) }
+    );
     return gsSpreadsheetId;
   })();
   try {
@@ -423,10 +665,13 @@ async function gsAppendRow(dayLabel, exId, entryId, rowValues) {
 async function gsSyncPending() {
   if (!gsClientId) { showToast("Configura primero el Client ID"); return; }
   const pending = [];
+  const seenEntryIds = new Set(); // avoid double-queueing entries shared by two days (same canonicalId)
   Object.entries(routine).forEach(([dayKey, day]) => {
     day.exercises.forEach((ex) => {
-      (logs[ex.id] || []).forEach((entry) => {
-        if (!entry.synced) pending.push({ day, ex, entry });
+      (logs[logKey(ex)] || []).forEach((entry) => {
+        if (entry.synced || seenEntryIds.has(entry.id)) return;
+        seenEntryIds.add(entry.id);
+        pending.push({ dayLabel: entry.dayLabel || day.label, ex, entry });
       });
     });
   });
@@ -443,10 +688,10 @@ async function gsSyncPending() {
   if (!gsSpreadsheetId) {
     try { await gsCreateSpreadsheet(); } catch (e) { showToast("No se pudo crear la hoja"); return; }
   }
-  for (const { day, ex, entry } of pending) {
+  for (const { dayLabel, ex, entry } of pending) {
     try {
       await gsFetchWithAutoRecreate(
-        (id) => `https://sheets.googleapis.com/v4/spreadsheets/${id}/values/${encodeURIComponent(day.label)}!A:G:append?valueInputOption=USER_ENTERED`,
+        (id) => `https://sheets.googleapis.com/v4/spreadsheets/${id}/values/${encodeURIComponent(dayLabel)}!A:G:append?valueInputOption=USER_ENTERED`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -479,7 +724,7 @@ async function gsLinkExistingSheet(idOrUrl) {
   gsSpreadsheetId = id;
   localStorage.setItem(GS_SHEET_ID_KEY, id);
   try {
-    await gsRequestToken("consent");
+    await gsRequestToken("select_account consent");
   } catch (e) {
     showToast("No se pudo conectar con Google");
     return;
@@ -489,6 +734,119 @@ async function gsLinkExistingSheet(idOrUrl) {
 }
 
 // ---------- Delete a row in Sheets matching a locally-deleted entry ----------
+// ---------- Keep the routine structure (exercises, sets/reps, rest, equipment) in sync ----------
+let gsRoutineSyncTimer = null;
+function scheduleRoutineSync() {
+  if (!gsClientId) return; // Sheets not configured, nothing to do
+  clearTimeout(gsRoutineSyncTimer);
+  gsRoutineSyncTimer = setTimeout(() => { gsSyncRoutineStructure(); }, 1200);
+}
+
+async function gsEnsureTabExists(title, headerRow) {
+  const metaRes = await gsFetch(`https://sheets.googleapis.com/v4/spreadsheets/${gsSpreadsheetId}?fields=sheets.properties`);
+  if (metaRes.status === 404) { await gsRecreateAfterDeletion(); return; }
+  if (!metaRes.ok) return;
+  const meta = await metaRes.json();
+  const exists = (meta.sheets || []).some((s) => s.properties.title === title);
+  if (exists) return;
+  await gsFetch(`https://sheets.googleapis.com/v4/spreadsheets/${gsSpreadsheetId}:batchUpdate`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ requests: [{ addSheet: { properties: { title, index: 0 } } }] }),
+  });
+  await gsFetch(
+    `https://sheets.googleapis.com/v4/spreadsheets/${gsSpreadsheetId}/values/${encodeURIComponent(title)}!A1:${String.fromCharCode(64 + headerRow.length)}1?valueInputOption=USER_ENTERED`,
+    { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ values: [headerRow] }) }
+  );
+}
+async function gsEnsureRoutineTabExists() {
+  return gsEnsureTabExists(GS_ROUTINE_SHEET, ["Día", "Ejercicio", "Series x Reps", "Descanso", "Equipo prioritario"]);
+}
+
+async function gsSyncRoutineStructure() {
+  if (!gsClientId) return;
+  try {
+    if (!gsSpreadsheetId) { await gsCreateSpreadsheet(); }
+    else { await gsEnsureRoutineTabExists(); }
+    if (!gsSpreadsheetId) return;
+
+    const rows = [];
+    Object.values(routine).forEach((day) => {
+      day.exercises.forEach((ex) => {
+        rows.push([day.label, ex.name, ex.target, ex.rest, ex.equip || ""]);
+      });
+    });
+
+    // clear old content then write the current structure fresh (simplest way to reflect
+    // renames/removals/reorders correctly without diffing row by row)
+    await gsFetch(
+      `https://sheets.googleapis.com/v4/spreadsheets/${gsSpreadsheetId}/values/${encodeURIComponent(GS_ROUTINE_SHEET)}!A2:E100000:clear`,
+      { method: "POST" }
+    );
+    if (rows.length > 0) {
+      await gsFetch(
+        `https://sheets.googleapis.com/v4/spreadsheets/${gsSpreadsheetId}/values/${encodeURIComponent(GS_ROUTINE_SHEET)}!A2:E100000:append?valueInputOption=USER_ENTERED`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ values: rows }),
+        }
+      );
+    }
+    gsUpdateStatus();
+  } catch (e) {
+    // best-effort — routine structure sync failing shouldn't block using the app
+  }
+}
+
+// ---------- Bodyweight sync ----------
+async function gsAppendBodyweight(entryId, rowValues) {
+  if (!gsClientId) return;
+  try {
+    if (!gsSpreadsheetId) { await gsCreateSpreadsheet(); }
+    else { await gsEnsureTabExists(GS_BW_SHEET, ["Fecha", "Peso", "Unidad", "Notas"]); }
+    await gsFetch(
+      `https://sheets.googleapis.com/v4/spreadsheets/${gsSpreadsheetId}/values/${encodeURIComponent(GS_BW_SHEET)}!A:D:append?valueInputOption=USER_ENTERED`,
+      { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ values: [rowValues] }) }
+    );
+    const found = bodyweightLog.find((l) => l.id === entryId);
+    if (found) { found.synced = true; saveBodyweight(); }
+    gsUpdateStatus();
+  } catch (e) {
+    showToast("No se pudo sincronizar el peso (guardado localmente, pendiente)");
+  }
+}
+
+async function gsDeleteBodyweightRow(entry) {
+  if (!gsClientId || !gsSpreadsheetId) return;
+  if (!entry.synced) return;
+  try {
+    const metaRes = await gsFetch(`https://sheets.googleapis.com/v4/spreadsheets/${gsSpreadsheetId}?fields=sheets.properties`);
+    if (metaRes.status === 404) { await gsRecreateAfterDeletion(); return; }
+    if (!metaRes.ok) return;
+    const meta = await metaRes.json();
+    const sheetMeta = (meta.sheets || []).find((s) => s.properties.title === GS_BW_SHEET);
+    if (!sheetMeta) return;
+    const sheetId = sheetMeta.properties.sheetId;
+
+    const valRes = await gsFetch(`https://sheets.googleapis.com/v4/spreadsheets/${gsSpreadsheetId}/values/${encodeURIComponent(GS_BW_SHEET)}!A2:D100000`);
+    if (!valRes.ok) return;
+    const data = await valRes.json();
+    const rows = data.values || [];
+    const idx = rows.findIndex((row) => {
+      const [date, weight, unit, notes] = row;
+      return date === entry.date && parseFloat(weight) === entry.weight && (unit || "lb") === entry.unit && (notes || "") === (entry.notes || "");
+    });
+    if (idx === -1) return;
+    const sheetRowIndex = idx + 1;
+    await gsFetch(`https://sheets.googleapis.com/v4/spreadsheets/${gsSpreadsheetId}:batchUpdate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ requests: [{ deleteDimension: { range: { sheetId, dimension: "ROWS", startIndex: sheetRowIndex, endIndex: sheetRowIndex + 1 } } }] }),
+    });
+  } catch (e) { /* best-effort cleanup */ }
+}
+
 async function gsDeleteRow(dayLabel, exName, entry) {
   if (!gsClientId || !gsSpreadsheetId) return; // nothing configured, only local matters
   if (!entry.synced) return; // was never pushed to Sheets, nothing to remove there
@@ -562,6 +920,23 @@ async function gsPullAll(silent) {
     const nameIndex = buildNameIndex();
 
     for (const title of sheetTitles) {
+      if (title === GS_ROUTINE_SHEET) continue; // structure sheet, not a log sheet
+      if (title === GS_BW_SHEET) {
+        const bwRes = await gsFetch(`https://sheets.googleapis.com/v4/spreadsheets/${gsSpreadsheetId}/values/${encodeURIComponent(GS_BW_SHEET)}!A2:D100000`);
+        if (!bwRes.ok) continue;
+        const bwData = await bwRes.json();
+        (bwData.values || []).forEach((row) => {
+          const [date, weight, unit, notes] = row;
+          if (!date || weight == null) return;
+          const w = parseFloat(weight);
+          if (isNaN(w)) return;
+          const dup = bodyweightLog.some((l) => l.date === date && l.weight === w && l.unit === (unit || "lb") && (l.notes || "") === (notes || ""));
+          if (dup) return;
+          bodyweightLog.push({ id: `pull_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`, date, weight: w, unit: unit || "lb", notes: notes || "", synced: true });
+          pulled++;
+        });
+        continue;
+      }
       const valRes = await gsFetch(
         `https://sheets.googleapis.com/v4/spreadsheets/${gsSpreadsheetId}/values/${encodeURIComponent(title)}!A2:G100000`
       );
@@ -587,7 +962,7 @@ async function gsPullAll(silent) {
         pulled++;
       });
     }
-    if (pulled > 0) { saveLogs(); render(); }
+    if (pulled > 0) { saveLogs(); saveBodyweight(); render(); }
   } catch (e) {
     if (!silent) showToast("No se pudo traer datos de Sheets");
     return { pulled };
@@ -641,6 +1016,7 @@ function gsRenderModal() {
       <button class="hist-btn" id="gsLinkBtn" style="width:100%;justify-content:center;margin-bottom:8px;">Vincular y traer datos</button>
     </div>
     <button class="hist-btn" id="gsResetBtn" style="width:100%;justify-content:center;margin-bottom:8px;">Cambiar Client ID</button>
+    <button class="hist-btn" id="forceUpdateBtn" style="width:100%;justify-content:center;margin-bottom:8px;">&#8635; Forzar actualización de la app</button>
     <div style="border-top:1px solid var(--line);margin:10px 0;padding-top:10px;">
       <p style="font-size:12px;color:var(--danger);font-weight:700;margin-bottom:6px;">Zona de reinicio</p>
       <button class="hist-btn" id="gsClearLocalBtn" style="width:100%;justify-content:center;margin-bottom:8px;border-color:var(--danger);color:var(--danger);">Borrar historial local (este dispositivo)</button>
@@ -650,10 +1026,11 @@ function gsRenderModal() {
   `;
   document.getElementById("gsConnectBtn").addEventListener("click", async () => {
     try {
-      await gsRequestToken("consent");
+      await gsRequestToken("select_account consent");
       showToast("Conectado a Google");
       const res = await gsPullAll(true);
       if (res.pulled > 0) showToast(`${res.pulled} registros nuevos traídos de Sheets`);
+      await gsSyncRoutineStructure(); // catch up any structural edits made while offline
       gsUpdateStatus();
       gsRenderModal();
     } catch (e) {
@@ -690,11 +1067,27 @@ function gsRenderModal() {
     gsRenderModal();
     gsUpdateStatus();
   });
+  document.getElementById("forceUpdateBtn").addEventListener("click", async () => {
+    showToast("Actualizando...");
+    try {
+      if ("serviceWorker" in navigator) {
+        const regs = await navigator.serviceWorker.getRegistrations();
+        for (const r of regs) await r.unregister();
+      }
+      if ("caches" in window) {
+        const keys = await caches.keys();
+        await Promise.all(keys.map((k) => caches.delete(k)));
+      }
+    } catch (e) { /* best-effort, reload anyway */ }
+    location.reload();
+  });
   const clearLocalBtn = document.getElementById("gsClearLocalBtn");
   if (clearLocalBtn) clearLocalBtn.addEventListener("click", () => {
-    if (!confirm("¿Borrar TODO el historial guardado en este dispositivo? Esto no se puede deshacer. (La rutina/ejercicios no se borran, solo los registros de peso/reps)")) return;
+    if (!confirm("¿Borrar TODO el historial guardado en este dispositivo (sets Y peso corporal)? Esto no se puede deshacer. (La rutina/ejercicios no se borran)")) return;
     logs = {};
+    bodyweightLog = [];
     saveLogs();
+    saveBodyweight();
     render();
     gsUpdateStatus();
     gsRenderModal();
@@ -702,7 +1095,7 @@ function gsRenderModal() {
   });
   const clearSheetBtn = document.getElementById("gsClearSheetBtn");
   if (clearSheetBtn) clearSheetBtn.addEventListener("click", async () => {
-    if (!confirm("¿Borrar TODOS los datos en tu Google Sheet (se mantienen los encabezados)? Esto no se puede deshacer.")) return;
+    if (!confirm("¿Borrar TODOS los datos en tu Google Sheet (sets y peso corporal, se mantienen los encabezados)? Esto no se puede deshacer.")) return;
     if (!confirm("Confirma de nuevo: esto borra los datos en la hoja de Google, no solo en este dispositivo.")) return;
     try {
       for (const day of Object.values(routine)) {
@@ -711,6 +1104,10 @@ function gsRenderModal() {
           { method: "POST" }
         );
       }
+      await gsFetch(
+        `https://sheets.googleapis.com/v4/spreadsheets/${gsSpreadsheetId}/values/${encodeURIComponent(GS_BW_SHEET)}!A2:D100000:clear`,
+        { method: "POST" }
+      );
       showToast("Datos borrados en Google Sheets");
     } catch (e) {
       showToast("No se pudo borrar en Sheets");
@@ -739,10 +1136,27 @@ function epley1RM(weight, reps) {
   return weight * (1 + reps / 30);
 }
 
-function allExercisesFlat() {
+// Every day-instance definition, NOT deduplicated — needed so name-matching (imports, Sheets
+// pull) recognizes every historical name variant and still resolves to the shared canonical key.
+function allExerciseDefinitionsFlat() {
   const list = [];
   Object.entries(routine).forEach(([dayKey, day]) => {
     day.exercises.forEach((ex) => list.push({ ...ex, dayKey, dayLabel: day.label }));
+  });
+  return list;
+}
+
+// Deduplicated by canonical log key — for display lists (exercise picker, PR table) where a
+// shared exercise (same movement, logged from two different days) should appear only once.
+function allExercisesFlat() {
+  const seen = {};
+  const list = [];
+  allExerciseDefinitionsFlat().forEach((ex) => {
+    const key = logKey(ex);
+    if (seen[key]) { seen[key].dayLabels.push(ex.dayLabel); return; }
+    const item = { ...ex, id: key, dayLabels: [ex.dayLabel] };
+    seen[key] = item;
+    list.push(item);
   });
   return list;
 }
@@ -897,7 +1311,14 @@ function statsRenderVolumePerDay() {
   const volumes = Object.entries(routine).map(([dayKey, day]) => {
     let total = 0;
     day.exercises.forEach((ex) => {
-      (logs[ex.id] || []).forEach((e) => { total += (e.weight || 0) * (e.reps || 0); });
+      const key = logKey(ex);
+      (logs[key] || []).forEach((e) => {
+        // A shared exercise (same movement logged from two different days) only counts
+        // toward the day it was actually performed on, using the entry's own dayLabel —
+        // otherwise its volume would be counted twice (once per day that references it).
+        const belongsToThisDay = e.dayLabel ? e.dayLabel === day.label : true; // legacy entries without dayLabel: include once, best effort
+        if (belongsToThisDay) total += (e.weight || 0) * (e.reps || 0);
+      });
     });
     return total;
   });
@@ -1003,7 +1424,7 @@ function statsRenderPRTable() {
       if (e.weight > bestW.weight) bestW = e;
       if (epley1RM(e.weight, e.reps) > epley1RM(bestE1.weight, bestE1.reps)) bestE1 = e;
     });
-    return { name: ex.name, dayLabel: ex.dayLabel, bestW, bestE1RM: epley1RM(bestE1.weight, bestE1.reps) };
+    return { name: ex.name, dayLabel: ex.dayLabels.join(" y "), bestW, bestE1RM: epley1RM(bestE1.weight, bestE1.reps) };
   });
   wrap.innerHTML = `
     <div style="display:flex;flex-direction:column;gap:6px;">
@@ -1064,6 +1485,98 @@ document.getElementById("statsCloseBtn").addEventListener("click", () => {
   document.getElementById("statsModal").classList.add("hidden");
 });
 
+// ---------- Bodyweight tracking ----------
+let bwChart = null;
+function bwRender() {
+  const body = document.getElementById("bwBody");
+  const sorted = sortByDateDesc(bodyweightLog);
+  const chronological = sortByDateAsc(bodyweightLog);
+
+  body.innerHTML = `
+    <div class="card" style="margin-bottom:14px;">
+      <input class="input-full" type="date" id="bwDate" value="${todayISO()}" style="margin-bottom:8px;">
+      <div class="form-row" style="margin-bottom:8px;">
+        <input class="input" type="number" inputmode="decimal" placeholder="Peso" id="bwWeight">
+        <div class="unit-toggle">
+          <button class="unit-btn active" data-bwunit="lb">lb</button>
+          <button class="unit-btn" data-bwunit="kg">kg</button>
+        </div>
+      </div>
+      <input class="input-full" placeholder="Notas (opcional)" id="bwNotes" style="margin-bottom:8px;">
+      <button class="save-btn" id="bwSaveBtn">&#10003; Registrar peso</button>
+    </div>
+    ${chronological.length > 1 ? `<div class="card" style="margin-bottom:14px;"><canvas id="bwChartCanvas" height="160"></canvas></div>` : ""}
+    <div style="font-size:13px;font-weight:700;color:var(--accent);margin-bottom:8px;">Historial</div>
+    ${sorted.length === 0 ? `<p style="font-size:13px;color:var(--txt-dim);">Aún no has registrado tu peso.</p>` : sorted.map((l) => `
+      <div class="bw-row" data-bw-id="${l.id}">
+        <span>${fmtDate(l.date)}</span>
+        <span style="font-weight:700;">${l.weight}${l.unit}</span>
+        <span style="color:var(--txt-dim);flex:1;text-align:right;margin-right:8px;">${esc(l.notes || "")}</span>
+        <button class="hist-del" data-action="bw-del">&#128465;</button>
+      </div>
+    `).join("")}
+  `;
+
+  document.querySelectorAll("[data-bwunit]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      document.querySelectorAll("[data-bwunit]").forEach((b) => b.classList.remove("active"));
+      btn.classList.add("active");
+    });
+  });
+
+  document.getElementById("bwSaveBtn").addEventListener("click", () => {
+    const date = document.getElementById("bwDate").value || todayISO();
+    const weight = document.getElementById("bwWeight").value;
+    const notes = document.getElementById("bwNotes").value;
+    const unit = document.querySelector("[data-bwunit].active")?.dataset.bwunit || "lb";
+    if (!weight) { showToast("Falta el peso"); return; }
+    const entry = { id: `${Date.now()}`, date, weight: parseFloat(weight), unit, notes: notes.trim(), synced: false };
+    bodyweightLog.push(entry);
+    saveBodyweight();
+    showToast("Peso registrado");
+    bwRender();
+    gsAppendBodyweight(entry.id, [entry.date, entry.weight, entry.unit, entry.notes]);
+  });
+
+  document.querySelectorAll('[data-action="bw-del"]').forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const id = btn.closest("[data-bw-id]").dataset.bwId;
+      const entry = bodyweightLog.find((l) => l.id === id);
+      bodyweightLog = bodyweightLog.filter((l) => l.id !== id);
+      saveBodyweight();
+      bwRender();
+      if (entry) gsDeleteBodyweightRow(entry);
+    });
+  });
+
+  if (chronological.length > 1) {
+    if (bwChart) bwChart.destroy();
+    const ctx = document.getElementById("bwChartCanvas").getContext("2d");
+    bwChart = new Chart(ctx, {
+      type: "line",
+      data: {
+        labels: chronological.map((l) => fmtDate(l.date)),
+        datasets: [{ label: `Peso corporal (${chronological[0].unit})`, data: chronological.map((l) => l.weight), borderColor: CHART_COLORS[0], backgroundColor: CHART_COLORS[0], tension: 0.25, pointRadius: 3 }],
+      },
+      options: {
+        responsive: true,
+        plugins: { legend: { labels: { color: "#F2F0EA", font: { size: 11 } } } },
+        scales: {
+          x: { ticks: { color: "#9A9EA6", font: { size: 10 } }, grid: { color: "#2C3036" } },
+          y: { ticks: { color: "#9A9EA6", font: { size: 10 } }, grid: { color: "#2C3036" } },
+        },
+      },
+    });
+  }
+}
+document.getElementById("btnBodyweight").addEventListener("click", () => {
+  document.getElementById("bwModal").classList.remove("hidden");
+  bwRender();
+});
+document.getElementById("bwCloseBtn").addEventListener("click", () => {
+  document.getElementById("bwModal").classList.add("hidden");
+});
+
 // ---------- Import / Export Excel ----------
 document.getElementById("btnImport").addEventListener("click", () => document.getElementById("importFile").click());
 
@@ -1109,6 +1622,7 @@ document.getElementById("importFile").addEventListener("change", async (e) => {
 
     if (importedCount > 0) {
       saveRoutine();
+      scheduleRoutineSync();
       activeDay = Object.keys(routine)[0];
       render();
       showToast(`Rutina importada (${importedCount} días)`);
@@ -1139,7 +1653,7 @@ function normName(s) {
 
 function buildNameIndex() {
   const idx = [];
-  allExercisesFlat().forEach((ex) => idx.push({ id: ex.id, norm: normName(ex.name) }));
+  allExerciseDefinitionsFlat().forEach((ex) => idx.push({ id: logKey(ex), norm: normName(ex.name) }));
   return idx;
 }
 
@@ -1246,7 +1760,11 @@ document.getElementById("btnExport").addEventListener("click", () => {
   Object.values(routine).forEach((day) => {
     const rows = [["Ejercicio", "Fecha", "Peso", "Unidad", "Reps", "Equipo", "Notas"]];
     day.exercises.forEach((ex) => {
-      const entries = sortByDateAsc(logs[ex.id] || []);
+      const allEntries = logs[logKey(ex)] || [];
+      // shared exercises (same movement logged from 2 days) only list entries actually
+      // performed on THIS day's tab, so the export mirrors the original day-by-day structure
+      const dayEntries = allEntries.filter((e) => (e.dayLabel ? e.dayLabel === day.label : true));
+      const entries = sortByDateAsc(dayEntries);
       if (entries.length === 0) {
         rows.push([ex.name, "", "", "", "", "", ""]);
       } else {
@@ -1259,6 +1777,13 @@ document.getElementById("btnExport").addEventListener("click", () => {
     ws["!cols"] = [{ wch: 34 }, { wch: 12 }, { wch: 8 }, { wch: 8 }, { wch: 8 }, { wch: 20 }, { wch: 24 }];
     XLSX.utils.book_append_sheet(wb, ws, day.label);
   });
+  // Bodyweight sheet
+  const bwRows = [["Fecha", "Peso", "Unidad", "Notas"]];
+  sortByDateAsc(bodyweightLog).forEach((l) => bwRows.push([l.date, l.weight, l.unit, l.notes || ""]));
+  const bwWs = XLSX.utils.aoa_to_sheet(bwRows);
+  bwWs["!cols"] = [{ wch: 12 }, { wch: 10 }, { wch: 8 }, { wch: 24 }];
+  XLSX.utils.book_append_sheet(wb, bwWs, "Peso corporal");
+
   const wbout = XLSX.write(wb, { bookType: "xlsx", type: "array" });
   const blob = new Blob([wbout], { type: "application/octet-stream" });
   const url = URL.createObjectURL(blob);

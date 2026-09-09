@@ -1,4 +1,4 @@
-const CACHE_NAME = "bitacora-cache-v11";
+const CACHE_NAME = "bitacora-cache-v15";
 const ASSETS = [
   "./",
   "./index.html",

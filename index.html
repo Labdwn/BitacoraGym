@@ -67,6 +67,21 @@
   .add-ex-btn { display: flex; align-items: center; justify-content: center; gap: 6px; background: transparent; border: 1px dashed var(--line); color: var(--txt-dim); border-radius: 10px; padding: 12px; font-size: 13px; width: 100%; }
   .toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: var(--accent); color: #15171A; padding: 9px 18px; border-radius: 20px; font-size: 13px; font-weight: 700; box-shadow: 0 4px 14px rgba(0,0,0,0.4); z-index: 100; }
   .hidden { display: none !important; }
+  button:active { transform: scale(0.96); }
+  .icon-btn:active, .tab:active { transform: scale(0.93); }
+  .card { transition: box-shadow 0.15s; }
+  .stepper-btn { width: 30px; height: 34px; flex-shrink: 0; background: var(--bg-raised); border: 1px solid var(--line); color: var(--txt); border-radius: 7px; font-size: 16px; font-weight: 700; display: flex; align-items: center; justify-content: center; }
+  .pr-badge { color: #E0B94D; font-weight: 700; }
+  .undo-bar { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: var(--bg-raised); border: 1px solid var(--line); color: var(--txt); padding: 9px 10px 9px 16px; border-radius: 24px; font-size: 13px; display: flex; align-items: center; gap: 12px; box-shadow: 0 4px 14px rgba(0,0,0,0.5); z-index: 100; }
+  .undo-btn { background: var(--accent); color: #15171A; border: none; border-radius: 18px; padding: 6px 14px; font-size: 12.5px; font-weight: 700; }
+  .rest-timer-bar { position: fixed; bottom: 0; left: 0; right: 0; background: var(--accent); color: #15171A; padding: 12px 16px; display: flex; align-items: center; justify-content: space-between; z-index: 90; box-shadow: 0 -4px 14px rgba(0,0,0,0.4); }
+  .rest-timer-time { font-family: 'Bebas Neue', sans-serif; font-size: 26px; letter-spacing: 1px; }
+  .rest-timer-label { font-size: 11.5px; font-weight: 600; opacity: 0.8; }
+  .rest-timer-actions { display: flex; gap: 8px; }
+  .rest-timer-btn { background: rgba(21,23,26,0.2); border: none; color: #15171A; border-radius: 8px; padding: 8px 12px; font-size: 12.5px; font-weight: 700; }
+  .timer-icon-btn { background: transparent; border: 1px solid var(--line); color: var(--txt-dim); border-radius: 8px; padding: 7px 10px; font-size: 12.5px; display: flex; align-items: center; gap: 4px; }
+  .order-btn { background: transparent; border: none; color: var(--txt-dim); padding: 2px 6px; font-size: 13px; }
+  .bw-row { display: flex; align-items: center; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid var(--line); font-size: 13px; }
 </style>
 </head>
 <body>
@@ -79,6 +94,7 @@
     </div>
     <div class="header-actions">
       <input type="file" id="importFile" accept=".xlsx,.xls" class="hidden">
+      <button class="icon-btn" id="btnBodyweight" title="Peso corporal">&#9878;</button>
       <button class="icon-btn" id="btnSheets" title="Google Sheets">&#128196;</button>
       <button class="icon-btn" id="btnStats" title="Estadísticas">&#128202;</button>
       <button class="icon-btn" id="btnImport" title="Importar Excel">&#8593;</button>
@@ -93,7 +109,7 @@
 <div class="focus-bar hidden" id="sheetsStatus" style="border-top:1px solid var(--line);"></div>
 
 <div id="sheetsModal" class="hidden" style="position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:50;display:flex;align-items:center;justify-content:center;padding:20px;">
-  <div style="background:var(--bg-card);border:1px solid var(--line);border-radius:14px;padding:20px;max-width:400px;width:100%;">
+  <div style="background:var(--bg-card);border:1px solid var(--line);border-radius:14px;padding:20px;max-width:400px;width:100%;max-height:85vh;overflow-y:auto;">
     <div style="font-family:'Bebas Neue',sans-serif;font-size:20px;margin-bottom:10px;">Google Sheets</div>
     <div id="sheetsModalBody"></div>
   </div>
@@ -107,9 +123,19 @@
   <div id="statsBody" style="padding:16px;max-width:640px;margin:0 auto;"></div>
 </div>
 
+<div id="bwModal" class="hidden" style="position:fixed;inset:0;background:var(--bg);z-index:50;overflow-y:auto;">
+  <div style="position:sticky;top:0;background:var(--bg);border-bottom:1px solid var(--line);padding:14px 16px;display:flex;align-items:center;justify-content:space-between;">
+    <span class="brand">Peso corporal</span>
+    <button class="icon-btn" id="bwCloseBtn">&times;</button>
+  </div>
+  <div id="bwBody" style="padding:16px;max-width:640px;margin:0 auto;"></div>
+</div>
+
 <main id="main"></main>
 
 <div id="toast" class="toast hidden"></div>
+<div id="undoBar" class="undo-bar hidden"></div>
+<div id="restTimerBar" class="rest-timer-bar hidden"></div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <script src="app.js"></script>
