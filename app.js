@@ -453,6 +453,7 @@ function wireCard(ex, dayExercises) {
 // ---------- Google Sheets integration ----------
 const GS_CLIENT_ID_KEY = "bitacora_gs_client_id";
 const GS_SHEET_ID_KEY = "bitacora_gs_sheet_id";
+const GS_EMAIL_HINT_KEY = "bitacora_gs_email_hint";
 const GS_SCOPE = "https://www.googleapis.com/auth/spreadsheets";
 const GS_ROUTINE_SHEET = "Rutina (estructura)";
 const GS_BW_SHEET = "Peso corporal";
@@ -461,6 +462,7 @@ let gsAccessToken = null;
 let gsTokenClient = null;
 let gsClientId = localStorage.getItem(GS_CLIENT_ID_KEY) || "";
 let gsSpreadsheetId = localStorage.getItem(GS_SHEET_ID_KEY) || "";
+let gsEmailHint = localStorage.getItem(GS_EMAIL_HINT_KEY) || "";
 let gsTokenPromise = null; // shared in-flight request, prevents concurrent calls from clobbering each other
 let gsCreatePromise = null; // same idea for spreadsheet creation
 
@@ -498,11 +500,13 @@ function gsUpdateStatus() {
 
 function gsInitTokenClient() {
   if (!gsClientId || !window.google) return null;
-  return google.accounts.oauth2.initTokenClient({
+  const config = {
     client_id: gsClientId,
     scope: GS_SCOPE,
     callback: () => {}, // set per-request
-  });
+  };
+  if (gsEmailHint) config.hint = gsEmailHint; // force this specific account, ignoring whatever is signed into the browser/device
+  return google.accounts.oauth2.initTokenClient(config);
 }
 
 function gsRequestToken(promptMode) {
@@ -1006,6 +1010,9 @@ function gsRenderModal() {
       ${connected ? " Conectado ✓" : " No conectado esta sesión."}
     </p>
     ${pendingCount > 0 ? `<p style="font-size:12.5px;color:var(--accent);margin-bottom:10px;">${pendingCount} registro${pendingCount !== 1 ? "s" : ""} pendiente${pendingCount !== 1 ? "s" : ""} de sincronizar</p>` : ""}
+    <p style="font-size:12px;color:var(--txt-dim);margin-bottom:6px;">Cuenta de Google a usar (evita que el navegador use otra sola):</p>
+    <input id="gsEmailHintInput" class="input-full" placeholder="tucorreo@gmail.com" value="${esc(gsEmailHint)}" style="margin-bottom:8px;">
+    <button class="hist-btn" id="gsSaveEmailHintBtn" style="width:100%;justify-content:center;margin-bottom:12px;">Guardar cuenta</button>
     <button class="save-btn" id="gsConnectBtn" style="margin-bottom:8px;">${connected ? "Reconectar" : "Conectar con Google"}</button>
     ${connected && gsSpreadsheetId ? `<button class="log-btn" id="gsPullBtn" style="width:100%;justify-content:center;margin-bottom:8px;">Actualizar desde Sheets</button>` : ""}
     ${pendingCount > 0 ? `<button class="log-btn" id="gsSyncBtn" style="width:100%;justify-content:center;margin-bottom:8px;">Sincronizar ${pendingCount} pendiente${pendingCount !== 1 ? "s" : ""}</button>` : ""}
@@ -1024,6 +1031,15 @@ function gsRenderModal() {
     </div>
     <button class="hist-btn" id="gsCloseModal" style="width:100%;justify-content:center;">Cerrar</button>
   `;
+  document.getElementById("gsSaveEmailHintBtn").addEventListener("click", () => {
+    const val = document.getElementById("gsEmailHintInput").value.trim();
+    gsEmailHint = val;
+    localStorage.setItem(GS_EMAIL_HINT_KEY, val);
+    gsTokenClient = null; // force re-init with the new hint on next connect
+    gsAccessToken = null; // the old token belonged to whichever account was active before
+    showToast(val ? "Cuenta guardada — vuelve a conectar" : "Cuenta borrada");
+    gsRenderModal();
+  });
   document.getElementById("gsConnectBtn").addEventListener("click", async () => {
     try {
       await gsRequestToken("select_account consent");
