@@ -459,12 +459,10 @@ const GS_ROUTINE_SHEET = "Rutina (estructura)";
 const GS_BW_SHEET = "Peso corporal";
 
 let gsAccessToken = null;
-let gsTokenClient = null;
 let gsClientId = localStorage.getItem(GS_CLIENT_ID_KEY) || "";
 let gsSpreadsheetId = localStorage.getItem(GS_SHEET_ID_KEY) || "";
 let gsEmailHint = localStorage.getItem(GS_EMAIL_HINT_KEY) || "";
-let gsTokenPromise = null; // shared in-flight request, prevents concurrent calls from clobbering each other
-let gsCreatePromise = null; // same idea for spreadsheet creation
+let gsCreatePromise = null; // prevents two concurrent calls from both creating a spreadsheet
 
 function gsRelativeSyncTime() {
   if (!gsLastSyncAt) return null;
@@ -498,54 +496,56 @@ function gsUpdateStatus() {
   }
 }
 
-function gsInitTokenClient() {
-  if (!gsClientId || !window.google) return null;
-  const config = {
-    client_id: gsClientId,
-    scope: GS_SCOPE,
-    callback: () => {}, // set per-request
-  };
-  if (gsEmailHint) config.hint = gsEmailHint; // force this specific account, ignoring whatever is signed into the browser/device
-  return google.accounts.oauth2.initTokenClient(config);
+// ---------- Auth via full-page redirect (classic OAuth2 implicit flow) ----------
+// We deliberately avoid Google's newer popup-based Identity Services client here — it
+// behaves inconsistently across mobile browsers. A plain redirect to Google's own login
+// page and back is the oldest, most universally compatible way to get an access token,
+// since it's just a normal page navigation, not a JS-managed popup.
+function gsRedirectUri() {
+  return window.location.origin + window.location.pathname;
 }
-
-function gsRequestToken(promptMode) {
-  // If a token request is already in flight, everyone shares that same promise
-  // instead of firing a new requestAccessToken() call that overwrites the pending one.
-  if (gsTokenPromise) return gsTokenPromise;
-  gsTokenPromise = new Promise((resolve, reject) => {
-    if (!gsTokenClient) gsTokenClient = gsInitTokenClient();
-    if (!gsTokenClient) { gsTokenPromise = null; reject(new Error("no-client")); return; }
-    gsTokenClient.callback = (resp) => {
-      gsTokenPromise = null;
-      if (resp.error) { reject(resp); return; }
-      gsAccessToken = resp.access_token;
-      resolve(gsAccessToken);
-    };
-    gsTokenClient.requestAccessToken({ prompt: promptMode });
+function gsBuildAuthUrl(promptVal) {
+  const params = new URLSearchParams({
+    client_id: gsClientId,
+    redirect_uri: gsRedirectUri(),
+    response_type: "token",
+    scope: GS_SCOPE,
+    include_granted_scopes: "true",
+    prompt: promptVal || "select_account",
   });
-  return gsTokenPromise;
+  if (gsEmailHint) params.set("login_hint", gsEmailHint);
+  return `https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`;
+}
+function gsStartAuthRedirect() {
+  if (!gsClientId) { showToast("Configura primero el Client ID"); return; }
+  window.location.href = gsBuildAuthUrl("select_account");
+}
+// Called once at page load: if Google just redirected back here with a token in the
+// URL fragment (#access_token=...), capture it and clean the URL.
+function gsHandleRedirectReturn() {
+  if (!location.hash || !location.hash.includes("access_token")) return false;
+  const params = new URLSearchParams(location.hash.substring(1));
+  const token = params.get("access_token");
+  if (token) gsAccessToken = token;
+  history.replaceState(null, "", location.pathname + location.search);
+  return !!token;
 }
 
 let gsInFlightCount = 0;
 let gsLastSyncAt = null;
 
 async function gsFetch(url, options = {}) {
+  if (!gsAccessToken) throw new Error("not-connected");
   gsInFlightCount++;
   gsUpdateStatus();
   try {
-    if (!gsAccessToken) await gsRequestToken("");
-    let res = await fetch(url, {
+    const res = await fetch(url, {
       ...options,
       headers: { ...(options.headers || {}), Authorization: `Bearer ${gsAccessToken}` },
     });
     if (res.status === 401) {
-      // token expired, retry once with a fresh one
-      await gsRequestToken("");
-      res = await fetch(url, {
-        ...options,
-        headers: { ...(options.headers || {}), Authorization: `Bearer ${gsAccessToken}` },
-      });
+      gsAccessToken = null; // expired/invalid — the user needs to reconnect (redirect flow can't refresh silently)
+      throw new Error("token-expired");
     }
     if (res.ok) gsLastSyncAt = new Date();
     return res;
@@ -683,10 +683,9 @@ async function gsSyncPending() {
 
   showToast(`Sincronizando ${pending.length} registros...`);
   let ok = 0, fail = 0;
-  try {
-    if (!gsAccessToken) await gsRequestToken("");
-  } catch (e) {
-    showToast("No se pudo conectar con Google");
+  if (!gsAccessToken) {
+    showToast("Conéctate primero con Google");
+    gsStartAuthRedirect();
     return;
   }
   if (!gsSpreadsheetId) {
@@ -727,17 +726,15 @@ async function gsLinkExistingSheet(idOrUrl) {
   if (!id) { showToast("No pude leer ese enlace/ID"); return; }
   gsSpreadsheetId = id;
   localStorage.setItem(GS_SHEET_ID_KEY, id);
-  try {
-    await gsRequestToken("select_account consent");
-  } catch (e) {
-    showToast("No se pudo conectar con Google");
+  if (!gsAccessToken) {
+    showToast("Conectando con Google...");
+    gsStartAuthRedirect(); // page navigates away and back; the pull happens automatically on return
     return;
   }
   await gsPullAll();
   showToast("Hoja vinculada y datos traídos");
 }
 
-// ---------- Delete a row in Sheets matching a locally-deleted entry ----------
 // ---------- Keep the routine structure (exercises, sets/reps, rest, equipment) in sync ----------
 let gsRoutineSyncTimer = null;
 function scheduleRoutineSync() {
@@ -855,7 +852,6 @@ async function gsDeleteRow(dayLabel, exName, entry) {
   if (!gsClientId || !gsSpreadsheetId) return; // nothing configured, only local matters
   if (!entry.synced) return; // was never pushed to Sheets, nothing to remove there
   try {
-    if (!gsAccessToken) await gsRequestToken("");
     const metaRes = await gsFetch(
       `https://sheets.googleapis.com/v4/spreadsheets/${gsSpreadsheetId}?fields=sheets.properties`
     );
@@ -900,10 +896,8 @@ async function gsDeleteRow(dayLabel, exName, entry) {
 
 async function gsPullAll(silent) {
   if (!gsClientId || !gsSpreadsheetId) return { pulled: 0 };
-  try {
-    if (!gsAccessToken) await gsRequestToken(silent ? "" : "");
-  } catch (e) {
-    if (!silent) showToast("No se pudo conectar con Google");
+  if (!gsAccessToken) {
+    if (!silent) { showToast("Conectando con Google..."); gsStartAuthRedirect(); }
     return { pulled: 0 };
   }
   let pulled = 0;
@@ -996,7 +990,6 @@ function gsRenderModal() {
       if (!v) return;
       gsClientId = v;
       localStorage.setItem(GS_CLIENT_ID_KEY, v);
-      gsTokenClient = null;
       gsRenderModal();
     });
     document.getElementById("gsCloseModal").addEventListener("click", gsCloseModal);
@@ -1005,6 +998,8 @@ function gsRenderModal() {
   const connected = !!gsAccessToken;
   const pendingCount = Object.values(logs).reduce((sum, arr) => sum + arr.filter((l) => !l.synced).length, 0);
   body.innerHTML = `
+    <p style="font-size:11px;color:var(--txt-dim);margin-bottom:2px;">Client ID guardado en ESTE dispositivo (cópialo y compáralo con Google Cloud):</p>
+    <div style="font-size:11px;font-family:monospace;color:var(--txt);background:var(--bg-raised);border:1px solid var(--line);border-radius:6px;padding:8px;margin-bottom:10px;word-break:break-all;user-select:all;">${esc(gsClientId)}</div>
     <p style="font-size:13px;color:var(--txt-dim);margin-bottom:10px;">
       ${gsSpreadsheetId ? "Hoja vinculada." : "Aún no se ha creado la hoja — se crea sola al conectar."}
       ${connected ? " Conectado ✓" : " No conectado esta sesión."}
@@ -1012,7 +1007,8 @@ function gsRenderModal() {
     ${pendingCount > 0 ? `<p style="font-size:12.5px;color:var(--accent);margin-bottom:10px;">${pendingCount} registro${pendingCount !== 1 ? "s" : ""} pendiente${pendingCount !== 1 ? "s" : ""} de sincronizar</p>` : ""}
     <p style="font-size:12px;color:var(--txt-dim);margin-bottom:6px;">Cuenta de Google a usar (evita que el navegador use otra sola):</p>
     <input id="gsEmailHintInput" class="input-full" placeholder="tucorreo@gmail.com" value="${esc(gsEmailHint)}" style="margin-bottom:8px;">
-    <button class="hist-btn" id="gsSaveEmailHintBtn" style="width:100%;justify-content:center;margin-bottom:12px;">Guardar cuenta</button>
+    <button class="hist-btn" id="gsSaveEmailHintBtn" style="width:100%;justify-content:center;margin-bottom:8px;">Guardar cuenta</button>
+    <a href="https://accounts.google.com/logout" target="_blank" rel="noopener" class="hist-btn" style="width:100%;justify-content:center;margin-bottom:12px;text-decoration:none;box-sizing:border-box;">Cerrar sesión de Google en este navegador</a>
     <button class="save-btn" id="gsConnectBtn" style="margin-bottom:8px;">${connected ? "Reconectar" : "Conectar con Google"}</button>
     ${connected && gsSpreadsheetId ? `<button class="log-btn" id="gsPullBtn" style="width:100%;justify-content:center;margin-bottom:8px;">Actualizar desde Sheets</button>` : ""}
     ${pendingCount > 0 ? `<button class="log-btn" id="gsSyncBtn" style="width:100%;justify-content:center;margin-bottom:8px;">Sincronizar ${pendingCount} pendiente${pendingCount !== 1 ? "s" : ""}</button>` : ""}
@@ -1035,23 +1031,12 @@ function gsRenderModal() {
     const val = document.getElementById("gsEmailHintInput").value.trim();
     gsEmailHint = val;
     localStorage.setItem(GS_EMAIL_HINT_KEY, val);
-    gsTokenClient = null; // force re-init with the new hint on next connect
-    gsAccessToken = null; // the old token belonged to whichever account was active before
+    gsAccessToken = null; // the old token belonged to whichever account was active before; force a fresh redirect
     showToast(val ? "Cuenta guardada — vuelve a conectar" : "Cuenta borrada");
     gsRenderModal();
   });
-  document.getElementById("gsConnectBtn").addEventListener("click", async () => {
-    try {
-      await gsRequestToken("select_account consent");
-      showToast("Conectado a Google");
-      const res = await gsPullAll(true);
-      if (res.pulled > 0) showToast(`${res.pulled} registros nuevos traídos de Sheets`);
-      await gsSyncRoutineStructure(); // catch up any structural edits made while offline
-      gsUpdateStatus();
-      gsRenderModal();
-    } catch (e) {
-      showToast("No se pudo conectar");
-    }
+  document.getElementById("gsConnectBtn").addEventListener("click", () => {
+    gsStartAuthRedirect(); // navigates the whole page to Google; picks back up in gsHandleRedirectReturn() on return
   });
   const pullBtn = document.getElementById("gsPullBtn");
   if (pullBtn) pullBtn.addEventListener("click", async () => {
@@ -1828,10 +1813,16 @@ if ("serviceWorker" in navigator) {
 // ---------- Initial render ----------
 render();
 
-// ---------- Try a silent background sync from Sheets on load (no popup if already granted) ----------
-if (gsClientId && gsSpreadsheetId && window.google) {
-  setTimeout(async () => {
+// ---------- Handle returning from Google's login redirect ----------
+const gsJustConnected = gsHandleRedirectReturn();
+if (gsJustConnected) {
+  showToast("Conectado a Google");
+  (async () => {
     const res = await gsPullAll(true);
     if (res && res.pulled > 0) showToast(`${res.pulled} registros nuevos traídos de Sheets`);
-  }, 800);
+    await gsSyncRoutineStructure(); // catch up any structural edits made while offline
+    gsUpdateStatus();
+  })();
+} else {
+  gsUpdateStatus(); // reflect "connected earlier but no token this pageload" etc.
 }
