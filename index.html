@@ -98,6 +98,7 @@
       <button class="icon-btn" id="btnStats" title="Estadísticas">&#128202;</button>
       <button class="icon-btn" id="btnImport" title="Importar Excel">&#8593;</button>
       <button class="icon-btn" id="btnExport" title="Exportar a Excel">&#8595;</button>
+      <button class="icon-btn" id="btnLinks" title="Vincular ejercicios">&#128279;</button>
       <button class="icon-btn" id="btnEdit" title="Editar rutina">&#9998;</button>
     </div>
   </div>
@@ -128,6 +129,14 @@
     <button class="icon-btn" id="bwCloseBtn">&times;</button>
   </div>
   <div id="bwBody" style="padding:16px;max-width:640px;margin:0 auto;"></div>
+</div>
+
+<div id="linksModal" class="hidden" style="position:fixed;inset:0;background:var(--bg);z-index:50;overflow-y:auto;">
+  <div style="position:sticky;top:0;background:var(--bg);border-bottom:1px solid var(--line);padding:14px 16px;display:flex;align-items:center;justify-content:space-between;">
+    <span class="brand">Vincular ejercicios</span>
+    <button class="icon-btn" id="linksCloseBtn">&times;</button>
+  </div>
+  <div id="linksBody" style="padding:16px;max-width:640px;margin:0 auto;"></div>
 </div>
 
 <main id="main"></main>

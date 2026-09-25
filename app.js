@@ -57,10 +57,12 @@ const DEFAULT_ROUTINE = {
 const RK = "bitacora_rutina_v1";
 const LK = "bitacora_logs_v1";
 const BWK = "bitacora_bodyweight_v1";
+const LNK = "bitacora_linkmap_v1"; // vínculos manuales entre ejercicios (anulan canonicalId)
 
 let routine = loadJSON(RK, DEFAULT_ROUTINE);
 let logs = loadJSON(LK, {});
 let bodyweightLog = loadJSON(BWK, []); // [{id, date, weight, unit, notes, synced}]
+let linkMap = loadJSON(LNK, {}); // { exId: groupKey } — se edita desde "Vincular ejercicios"
 let activeDay = Object.keys(routine)[0];
 migrateCanonicalLogs(); // one-time: merges old per-day history into shared canonical keys
 let editMode = false;
@@ -96,7 +98,15 @@ function todayISO() { return new Date().toISOString().slice(0, 10); }
 // Some exercises are the literal same movement done on two different days (e.g. "Sentadilla
 // hack" as primary on Day 4 and secondary on Day 2). Those share a canonicalId so their
 // weight/reps history and PRs are tracked as ONE continuous progression, not two separate ones.
-function logKey(ex) { return ex.canonicalId || ex.id; }
+function logKey(ex) {
+  // Un vínculo manual (pantalla "Vincular ejercicios") siempre gana sobre el canonicalId
+  // fijo del código — así vincular o desvincular nunca requiere tocar app.js.
+  if (Object.prototype.hasOwnProperty.call(linkMap, ex.id)) return linkMap[ex.id];
+  return ex.canonicalId || ex.id;
+}
+function saveLinkMap() {
+  try { localStorage.setItem(LNK, JSON.stringify(linkMap)); } catch (e) { showToast("No se pudo guardar"); }
+}
 
 // One-time migration: some exercises used to have separate per-day histories (e.g. "Sentadilla
 // hack" logged under a Day 2 id and a Day 4 id) that now share one canonicalId. Without this,
@@ -1576,6 +1586,161 @@ document.getElementById("btnBodyweight").addEventListener("click", () => {
 });
 document.getElementById("bwCloseBtn").addEventListener("click", () => {
   document.getElementById("bwModal").classList.add("hidden");
+});
+// ---------- Vincular ejercicios manualmente (anula canonicalId desde el sitio) ----------
+
+// Une dos ejercicios (o los suma a un grupo ya vinculado) para que compartan un solo
+// historial. Si cualquiera de los dos ya tenía registros propios, se fusionan sin duplicar.
+function linkExercises(idA, idB) {
+  if (idA === idB) return;
+  const defs = allExerciseDefinitionsFlat();
+  const exA = defs.find((e) => e.id === idA);
+  const exB = defs.find((e) => e.id === idB);
+  if (!exA || !exB) return;
+
+  const keyA = logKey(exA);
+  const keyB = logKey(exB);
+  if (keyA === keyB) { showToast("Ya están vinculados"); return; }
+
+  const groupIds = [...new Set(defs.filter((e) => logKey(e) === keyA || logKey(e) === keyB).map((e) => e.id))];
+  const newKey = keyA;
+
+  const entriesA = logs[keyA] || [];
+  const entriesB = logs[keyB] || [];
+  const merged = entriesA.slice();
+  entriesB.forEach((entry) => {
+    const dup = merged.some((e) => e.date === entry.date && e.weight === entry.weight && e.unit === entry.unit && e.reps === entry.reps && (e.equip || "") === (entry.equip || ""));
+    if (!dup) merged.push(entry);
+  });
+  logs[newKey] = merged;
+  if (keyB !== newKey) delete logs[keyB];
+
+  groupIds.forEach((id) => {
+    const ex = defs.find((e) => e.id === id);
+    const natural = ex.canonicalId || ex.id;
+    if (natural === newKey) delete linkMap[id];
+    else linkMap[id] = newKey;
+  });
+
+  saveLinkMap();
+  saveLogs();
+  showToast("Ejercicios vinculados");
+  render();
+}
+
+// Saca UN ejercicio de su grupo. Sus propios registros (identificados por el dayLabel con
+// que se guardaron) se separan; el resto del grupo sigue compartiendo historial.
+function unlinkSingle(exId) {
+  const defs = allExerciseDefinitionsFlat();
+  const ex = defs.find((e) => e.id === exId);
+  if (!ex) return;
+  const groupKey = logKey(ex);
+  const members = defs.filter((e) => logKey(e) === groupKey);
+  if (members.length <= 1) return;
+
+  const standaloneKey = ex.id;
+  linkMap[exId] = standaloneKey;
+
+  const groupEntries = logs[groupKey] || [];
+  const mine = groupEntries.filter((e) => e.dayLabel === ex.dayLabel);
+  const rest = groupEntries.filter((e) => e.dayLabel !== ex.dayLabel);
+  logs[groupKey] = rest;
+  logs[standaloneKey] = (logs[standaloneKey] || []).concat(mine);
+
+  saveLinkMap();
+  saveLogs();
+  showToast("Ejercicio desvinculado");
+  render();
+  linksRender();
+}
+
+// Desarma un grupo completo: cada ejercicio recupera su propio historial (por dayLabel).
+function unlinkGroup(groupKey) {
+  const defs = allExerciseDefinitionsFlat();
+  const members = defs.filter((e) => logKey(e) === groupKey);
+  if (members.length <= 1) return;
+  const groupEntries = logs[groupKey] || [];
+
+  members.forEach((ex) => {
+    linkMap[ex.id] = ex.id;
+    const mine = groupEntries.filter((e) => e.dayLabel === ex.dayLabel);
+    logs[ex.id] = (logs[ex.id] || []).concat(mine);
+  });
+  const claimedDays = new Set(members.map((m) => m.dayLabel));
+  const leftover = groupEntries.filter((e) => !claimedDays.has(e.dayLabel));
+  if (leftover.length > 0) logs[members[0].id] = (logs[members[0].id] || []).concat(leftover);
+  delete logs[groupKey];
+
+  saveLinkMap();
+  saveLogs();
+  showToast("Grupo desvinculado");
+  render();
+  linksRender();
+}
+
+function linksRender() {
+  const body = document.getElementById("linksBody");
+  const defs = allExerciseDefinitionsFlat();
+
+  const groups = {};
+  defs.forEach((ex) => { (groups[logKey(ex)] = groups[logKey(ex)] || []).push(ex); });
+  const linkedGroups = Object.entries(groups).filter(([, members]) => members.length > 1);
+
+  const groupsHTML = linkedGroups.length === 0
+    ? `<p style="font-size:13px;color:var(--txt-dim);margin-bottom:16px;">Aún no hay ejercicios vinculados.</p>`
+    : linkedGroups.map(([key, members]) => `
+        <div class="card" style="margin-bottom:10px;">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+            <span style="font-size:12px;color:var(--txt-dim);">Comparten historial</span>
+            <button class="hist-btn" data-unlink-group="${esc(key)}">Desvincular grupo</button>
+          </div>
+          ${members.map((m) => `
+            <div style="display:flex;align-items:center;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--line);">
+              <div>
+                <div style="font-size:13px;font-weight:600;">${esc(m.name)}</div>
+                <div style="font-size:11px;color:var(--txt-dim);">${esc(m.dayLabel)}</div>
+              </div>
+              <button class="hist-btn" data-unlink-id="${m.id}">Quitar</button>
+            </div>
+          `).join("")}
+        </div>
+      `).join("");
+
+  const options = defs.map((ex) => `<option value="${ex.id}">${esc(ex.dayLabel)} — ${esc(ex.name)}</option>`).join("");
+
+  body.innerHTML = `
+    <p style="font-size:13px;color:var(--txt-dim);margin-bottom:14px;">
+      Vincula dos ejercicios que sean el mismo movimiento (p. ej. repetido en dos días) para que compartan un único historial de peso y reps.
+    </p>
+    <div style="font-size:13px;font-weight:700;color:var(--accent);margin-bottom:8px;">Grupos vinculados</div>
+    ${groupsHTML}
+    <div style="font-size:13px;font-weight:700;color:var(--accent);margin:20px 0 8px;">Vincular nuevos</div>
+    <select id="linkSelA" class="input-full" style="margin-bottom:8px;">${options}</select>
+    <select id="linkSelB" class="input-full" style="margin-bottom:10px;">${options}</select>
+    <button class="save-btn" id="linkGoBtn">Vincular estos dos</button>
+  `;
+
+  body.querySelectorAll("[data-unlink-id]").forEach((btn) => {
+    btn.addEventListener("click", () => unlinkSingle(btn.dataset.unlinkId));
+  });
+  body.querySelectorAll("[data-unlink-group]").forEach((btn) => {
+    btn.addEventListener("click", () => unlinkGroup(btn.dataset.unlinkGroup));
+  });
+  document.getElementById("linkGoBtn").addEventListener("click", () => {
+    const idA = document.getElementById("linkSelA").value;
+    const idB = document.getElementById("linkSelB").value;
+    if (idA === idB) { showToast("Elige dos ejercicios distintos"); return; }
+    linkExercises(idA, idB);
+    linksRender();
+  });
+}
+
+document.getElementById("btnLinks").addEventListener("click", () => {
+  document.getElementById("linksModal").classList.remove("hidden");
+  linksRender();
+});
+document.getElementById("linksCloseBtn").addEventListener("click", () => {
+  document.getElementById("linksModal").classList.add("hidden");
 });
 
 // ---------- Import / Export Excel ----------
