@@ -143,7 +143,8 @@
 
 <div id="moreModal" class="hidden" style="position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:50;display:flex;align-items:flex-end;justify-content:center;">
   <div style="background:var(--bg-card);border:1px solid var(--line);border-radius:14px 14px 0 0;padding:16px;max-width:480px;width:100%;">
-    <div class="brand" style="font-size:18px;margin-bottom:12px;">Más opciones</div>
+        <div class="brand" style="font-size:18px;margin-bottom:12px;">Más opciones</div>
+    <button class="hist-btn" id="moreBulk" style="width:100%;justify-content:flex-start;margin-bottom:8px;">&#128221;&nbsp; Registro en masa</button>
     <button class="hist-btn" id="moreBodyweight" style="width:100%;justify-content:flex-start;margin-bottom:8px;">&#9878;&nbsp; Peso corporal</button>
     <button class="hist-btn" id="moreDiary" style="width:100%;justify-content:flex-start;margin-bottom:8px;">&#128197;&nbsp; Diario</button>
     <button class="hist-btn" id="morePlates" style="width:100%;justify-content:flex-start;margin-bottom:8px;">&#127947;&nbsp; Calculadora de discos</button>
@@ -179,6 +180,14 @@
     <button class="icon-btn" id="diaryCloseBtn">&times;</button>
   </div>
   <div id="diaryBody" style="padding:16px;max-width:640px;margin:0 auto;"></div>
+</div>
+
+<div id="bulkModal" class="hidden" style="position:fixed;inset:0;background:var(--bg);z-index:50;overflow-y:auto;">
+  <div style="position:sticky;top:0;background:var(--bg);border-bottom:1px solid var(--line);padding:14px 16px;display:flex;align-items:center;justify-content:space-between;">
+    <span class="brand">Registro en masa</span>
+    <button class="icon-btn" id="bulkCloseBtn">&times;</button>
+  </div>
+  <div id="bulkBody" style="padding:16px;max-width:640px;margin:0 auto;"></div>
 </div>
 
 <main id="main"></main>

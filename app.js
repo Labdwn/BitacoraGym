@@ -1797,6 +1797,11 @@ document.getElementById("btnMore").addEventListener("click", () => {
   document.getElementById("moreModal").classList.remove("hidden");
 });
 document.getElementById("moreCloseBtn").addEventListener("click", closeMoreMenu);
+document.getElementById("moreBulk").addEventListener("click", () => {
+  closeMoreMenu();
+  document.getElementById("bulkModal").classList.remove("hidden");
+  bulkRender();
+});
 document.getElementById("moreBodyweight").addEventListener("click", () => {
   closeMoreMenu();
   document.getElementById("btnBodyweight").click();
@@ -1826,6 +1831,92 @@ document.getElementById("moreDiary").addEventListener("click", () => {
   closeMoreMenu();
   document.getElementById("diaryModal").classList.remove("hidden");
   diaryRender();
+});
+
+// ---------- Registro en masa (poner al día varios ejercicios de un día de un jalón) ----------
+function bulkRenderExercises() {
+  const dayKey = document.getElementById("bulkDaySelect").value;
+  const day = routine[dayKey];
+  const listEl = document.getElementById("bulkExList");
+  if (!day) { listEl.innerHTML = ""; return; }
+  listEl.innerHTML = day.exercises.map((ex) => {
+    const last = sortByDateDesc(logs[logKey(ex)] || [])[0];
+    return `
+    <div class="card" data-bulk-id="${ex.id}" style="margin-bottom:10px;">
+      <div class="ex-name" style="margin-bottom:8px;">${esc(ex.name)}</div>
+      <div class="form-row" style="margin-bottom:6px;">
+        <input class="input" type="number" inputmode="decimal" placeholder="Peso" data-bulk-field="weight" value="${last ? last.weight : ""}">
+        <div class="unit-toggle">
+          <button class="unit-btn ${(!last || last.unit === "lb") ? "active" : ""}" data-bulk-unit="lb">lb</button>
+          <button class="unit-btn ${(last && last.unit === "kg") ? "active" : ""}" data-bulk-unit="kg">kg</button>
+        </div>
+        <input class="input" type="number" inputmode="numeric" placeholder="Reps" data-bulk-field="reps" value="${last ? last.reps : ""}">
+      </div>
+      <input class="input-full" placeholder="Equipo (opcional)" data-bulk-field="equip" style="margin-bottom:6px;">
+      <input class="input-full" placeholder="Notas (opcional)" data-bulk-field="notes">
+    </div>`;
+  }).join("");
+  listEl.querySelectorAll("[data-bulk-unit]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const row = btn.closest("[data-bulk-id]");
+      row.querySelectorAll("[data-bulk-unit]").forEach((b) => b.classList.remove("active"));
+      btn.classList.add("active");
+    });
+  });
+}
+
+function bulkSaveAll() {
+  const dayKey = document.getElementById("bulkDaySelect").value;
+  const date = document.getElementById("bulkDate").value || todayISO();
+  const day = routine[dayKey];
+  if (!day) return;
+  let saved = 0, prs = 0;
+  day.exercises.forEach((ex) => {
+    const row = document.querySelector(`#bulkExList [data-bulk-id="${ex.id}"]`);
+    if (!row) return;
+    const weight = row.querySelector('[data-bulk-field="weight"]').value;
+    const reps = row.querySelector('[data-bulk-field="reps"]').value;
+    if (!weight || !reps) return; // vacío = no se registra ese ejercicio esta vez
+    const equip = row.querySelector('[data-bulk-field="equip"]').value;
+    const notes = row.querySelector('[data-bulk-field="notes"]').value;
+    const unit = row.querySelector("[data-bulk-unit].active")?.dataset.bulkUnit || "lb";
+    const weightNum = parseFloat(weight);
+    const key = logKey(ex);
+    const priorEntries = logs[key] || [];
+    const priorMax = priorEntries.reduce((max, l) => Math.max(max, l.weight), 0);
+    if (priorEntries.length > 0 && weightNum > priorMax) prs++;
+    const entry = {
+      id: `bulk_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+      date, weight: weightNum, unit, reps: parseInt(reps, 10),
+      equip: equip.trim(), notes: notes.trim(), synced: false, dayLabel: day.label,
+    };
+    logs[key] = [entry, ...priorEntries];
+    saved++;
+    gsAppendRow(day.label, key, entry.id, [ex.name, entry.date, entry.weight, entry.unit, entry.reps, entry.equip, entry.notes]);
+  });
+  if (saved === 0) { showToast("No llenaste ningún ejercicio"); return; }
+  saveLogs();
+  render();
+  showToast(`${saved} registro${saved !== 1 ? "s" : ""} guardado${saved !== 1 ? "s" : ""}${prs > 0 ? ` (🏆 ${prs} PR${prs !== 1 ? "s" : ""})` : ""}`);
+  bulkRenderExercises(); // refresca con lo recién guardado — listo para seguir con otro día/fecha
+}
+
+function bulkRender() {
+  const body = document.getElementById("bulkBody");
+  const dayOptions = Object.entries(routine).map(([k, d]) => `<option value="${k}">${esc(d.label)} — ${esc(d.focus)}</option>`).join("");
+  body.innerHTML = `
+    <input class="input-full" type="date" id="bulkDate" value="${todayISO()}" style="margin-bottom:10px;">
+    <select id="bulkDaySelect" class="input-full" style="margin-bottom:14px;">${dayOptions}</select>
+    <div id="bulkExList"></div>
+    <button class="save-btn" id="bulkSaveBtn" style="margin-top:6px;">&#10003; Guardar todos los llenos</button>
+    <p style="font-size:11.5px;color:var(--txt-dim);margin-top:8px;text-align:center;">Deja en blanco los ejercicios que no quieras registrar — solo se guardan los que tengan peso y reps.</p>
+  `;
+  document.getElementById("bulkDaySelect").addEventListener("change", bulkRenderExercises);
+  document.getElementById("bulkSaveBtn").addEventListener("click", bulkSaveAll);
+  bulkRenderExercises();
+}
+document.getElementById("bulkCloseBtn").addEventListener("click", () => {
+  document.getElementById("bulkModal").classList.add("hidden");
 });
 
 // ---------- Calculadora de discos + conversor lb/kg ----------
