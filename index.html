@@ -91,15 +91,17 @@
       <span style="color: var(--accent); font-size: 20px;">&#9877;</span>
       <span class="brand">Bitácora</span>
     </div>
-    <div class="header-actions">
+        <div class="header-actions">
       <input type="file" id="importFile" accept=".xlsx,.xls" class="hidden">
-      <button class="icon-btn" id="btnBodyweight" title="Peso corporal">&#9878;</button>
+      <input type="file" id="backupFile" accept=".json" class="hidden">
+      <button class="icon-btn hidden" id="btnBodyweight" title="Peso corporal">&#9878;</button>
+      <button class="icon-btn hidden" id="btnImport" title="Importar Excel">&#8593;</button>
+      <button class="icon-btn hidden" id="btnExport" title="Exportar a Excel">&#8595;</button>
+      <button class="icon-btn hidden" id="btnLinks" title="Vincular ejercicios">&#128279;</button>
       <button class="icon-btn" id="btnSheets" title="Google Sheets">&#128196;</button>
       <button class="icon-btn" id="btnStats" title="Estadísticas">&#128202;</button>
-      <button class="icon-btn" id="btnImport" title="Importar Excel">&#8593;</button>
-      <button class="icon-btn" id="btnExport" title="Exportar a Excel">&#8595;</button>
-      <button class="icon-btn" id="btnLinks" title="Vincular ejercicios">&#128279;</button>
       <button class="icon-btn" id="btnEdit" title="Editar rutina">&#9998;</button>
+      <button class="icon-btn" id="btnMore" title="Más opciones">&#8942;</button>
     </div>
   </div>
   <div class="tab-row" id="tabRow"></div>
@@ -137,6 +139,46 @@
     <button class="icon-btn" id="linksCloseBtn">&times;</button>
   </div>
   <div id="linksBody" style="padding:16px;max-width:640px;margin:0 auto;"></div>
+</div>
+
+<div id="moreModal" class="hidden" style="position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:50;display:flex;align-items:flex-end;justify-content:center;">
+  <div style="background:var(--bg-card);border:1px solid var(--line);border-radius:14px 14px 0 0;padding:16px;max-width:480px;width:100%;">
+    <div class="brand" style="font-size:18px;margin-bottom:12px;">Más opciones</div>
+    <button class="hist-btn" id="moreBodyweight" style="width:100%;justify-content:flex-start;margin-bottom:8px;">&#9878;&nbsp; Peso corporal</button>
+    <button class="hist-btn" id="moreDiary" style="width:100%;justify-content:flex-start;margin-bottom:8px;">&#128197;&nbsp; Diario</button>
+    <button class="hist-btn" id="morePlates" style="width:100%;justify-content:flex-start;margin-bottom:8px;">&#127947;&nbsp; Calculadora de discos</button>
+    <button class="hist-btn" id="moreLinks" style="width:100%;justify-content:flex-start;margin-bottom:8px;">&#128279;&nbsp; Vincular ejercicios</button>
+    <button class="hist-btn" id="moreImport" style="width:100%;justify-content:flex-start;margin-bottom:8px;">&#8593;&nbsp; Importar Excel</button>
+    <button class="hist-btn" id="moreExport" style="width:100%;justify-content:flex-start;margin-bottom:8px;">&#8595;&nbsp; Exportar Excel</button>
+    <button class="hist-btn" id="moreBackup" style="width:100%;justify-content:flex-start;margin-bottom:8px;">&#128190;&nbsp; Copia de seguridad</button>
+    <button class="hist-btn" id="moreCloseBtn" style="width:100%;justify-content:center;margin-top:4px;">Cerrar</button>
+  </div>
+</div>
+
+<div id="platesModal" class="hidden" style="position:fixed;inset:0;background:var(--bg);z-index:50;overflow-y:auto;">
+  <div style="position:sticky;top:0;background:var(--bg);border-bottom:1px solid var(--line);padding:14px 16px;display:flex;align-items:center;justify-content:space-between;">
+    <span class="brand">Calculadora de discos</span>
+    <button class="icon-btn" id="platesCloseBtn">&times;</button>
+  </div>
+  <div id="platesBody" style="padding:16px;max-width:640px;margin:0 auto;"></div>
+</div>
+
+<div id="backupModal" class="hidden" style="position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:50;display:flex;align-items:center;justify-content:center;padding:20px;">
+  <div style="background:var(--bg-card);border:1px solid var(--line);border-radius:14px;padding:20px;max-width:400px;width:100%;">
+    <div class="brand" style="font-size:18px;margin-bottom:10px;">Copia de seguridad</div>
+    <p style="font-size:13px;color:var(--txt-dim);margin-bottom:14px;">Guarda o restaura toda la rutina, registros, peso corporal y vínculos en un solo archivo .json.</p>
+    <button class="save-btn" id="backupExportBtn" style="margin-bottom:8px;">&#8595; Descargar copia (.json)</button>
+    <button class="hist-btn" id="backupImportBtn" style="width:100%;justify-content:center;margin-bottom:8px;border-color:var(--danger);color:var(--danger);">&#8593; Restaurar desde archivo</button>
+    <button class="hist-btn" id="backupCloseBtn" style="width:100%;justify-content:center;">Cerrar</button>
+  </div>
+</div>
+
+<div id="diaryModal" class="hidden" style="position:fixed;inset:0;background:var(--bg);z-index:50;overflow-y:auto;">
+  <div style="position:sticky;top:0;background:var(--bg);border-bottom:1px solid var(--line);padding:14px 16px;display:flex;align-items:center;justify-content:space-between;">
+    <span class="brand">Diario</span>
+    <button class="icon-btn" id="diaryCloseBtn">&times;</button>
+  </div>
+  <div id="diaryBody" style="padding:16px;max-width:640px;margin:0 auto;"></div>
 </div>
 
 <main id="main"></main>

@@ -903,6 +903,48 @@ async function gsDeleteRow(dayLabel, exName, entry) {
     // silent — the local delete already succeeded, this is just best-effort cleanup in Sheets
   }
 }
+// Trae la estructura (nombres/series/descanso/equipo) desde la hoja "Rutina (estructura)" y la
+// aplica localmente. Empareja por posición dentro de cada día (mismo orden en que se escribe
+// en gsSyncRoutineStructure), no por id — la hoja no guarda ids. Si el número de ejercicios de
+// ese día no coincide con lo local, se salta ese día entero para no asignar un nombre al
+// ejercicio equivocado (típicamente pasa si agregaste/quitaste un ejercicio en otro dispositivo
+// sin sincronizar todavía).
+async function gsPullRoutineStructure(silent) {
+  if (!gsClientId || !gsSpreadsheetId || !gsAccessToken) return { applied: 0 };
+  try {
+    const res = await gsFetch(
+      `https://sheets.googleapis.com/v4/spreadsheets/${gsSpreadsheetId}/values/${encodeURIComponent(GS_ROUTINE_SHEET)}!A2:E100000`
+    );
+    if (!res.ok) return { applied: 0 };
+    const data = await res.json();
+    const byDay = {};
+    (data.values || []).forEach((row) => {
+      const [dayLabel, name, target, rest, equip] = row;
+      if (!dayLabel || !name) return;
+      (byDay[dayLabel] = byDay[dayLabel] || []).push({
+        name: name.trim(), target: (target || "").trim(), rest: (rest || "").trim(), equip: (equip || "").trim(),
+      });
+    });
+
+    let applied = 0;
+    Object.values(routine).forEach((day) => {
+      const sheetRows = byDay[day.label];
+      if (!sheetRows || sheetRows.length !== day.exercises.length) return;
+      day.exercises.forEach((ex, i) => {
+        const r = sheetRows[i];
+        if (ex.name !== r.name || ex.target !== r.target || ex.rest !== r.rest || (ex.equip || "") !== r.equip) {
+          ex.name = r.name; ex.target = r.target; ex.rest = r.rest; ex.equip = r.equip;
+          applied++;
+        }
+      });
+    });
+    if (applied > 0) { saveRoutine(); render(); }
+    return { applied };
+  } catch (e) {
+    if (!silent) showToast("No se pudo traer la estructura de la rutina");
+    return { applied: 0 };
+  }
+}
 
 async function gsPullAll(silent) {
   if (!gsClientId || !gsSpreadsheetId) return { pulled: 0 };
@@ -925,6 +967,11 @@ async function gsPullAll(silent) {
     if (!metaRes.ok) throw new Error("meta-failed");
     const meta = await metaRes.json();
     const sheetTitles = (meta.sheets || []).map((s) => s.properties.title);
+
+    // Trae también los nombres/series/descanso/equipo antes de armar el índice de nombres,
+    // para que el emparejamiento de registros use la versión más reciente.
+    await gsPullRoutineStructure(true);
+
     const nameIndex = buildNameIndex();
 
     for (const title of sheetTitles) {
@@ -1741,6 +1788,222 @@ document.getElementById("btnLinks").addEventListener("click", () => {
 });
 document.getElementById("linksCloseBtn").addEventListener("click", () => {
   document.getElementById("linksModal").classList.add("hidden");
+});
+
+// ---------- Menú "Más opciones" (agrupa lo de uso poco frecuente) ----------
+function closeMoreMenu() { document.getElementById("moreModal").classList.add("hidden"); }
+
+document.getElementById("btnMore").addEventListener("click", () => {
+  document.getElementById("moreModal").classList.remove("hidden");
+});
+document.getElementById("moreCloseBtn").addEventListener("click", closeMoreMenu);
+document.getElementById("moreBodyweight").addEventListener("click", () => {
+  closeMoreMenu();
+  document.getElementById("btnBodyweight").click();
+});
+document.getElementById("moreImport").addEventListener("click", () => {
+  closeMoreMenu();
+  document.getElementById("btnImport").click();
+});
+document.getElementById("moreExport").addEventListener("click", () => {
+  closeMoreMenu();
+  document.getElementById("btnExport").click();
+});
+document.getElementById("moreLinks").addEventListener("click", () => {
+  closeMoreMenu();
+  document.getElementById("btnLinks").click();
+});
+document.getElementById("morePlates").addEventListener("click", () => {
+  closeMoreMenu();
+  document.getElementById("platesModal").classList.remove("hidden");
+  platesRender();
+});
+document.getElementById("moreBackup").addEventListener("click", () => {
+  closeMoreMenu();
+  document.getElementById("backupModal").classList.remove("hidden");
+});
+document.getElementById("moreDiary").addEventListener("click", () => {
+  closeMoreMenu();
+  document.getElementById("diaryModal").classList.remove("hidden");
+  diaryRender();
+});
+
+// ---------- Calculadora de discos + conversor lb/kg ----------
+const PLATES_LB = [45, 35, 25, 10, 5, 2.5];
+const PLATES_KG = [20, 15, 10, 5, 2.5, 1.25];
+const LB_PER_KG = 2.20462;
+
+function calcPlatesPerSide(perSideWeight, unit) {
+  const plates = unit === "kg" ? PLATES_KG : PLATES_LB;
+  let remaining = Math.round(perSideWeight * 100) / 100;
+  const used = [];
+  for (const p of plates) {
+    while (remaining >= p - 0.001) { used.push(p); remaining -= p; }
+  }
+  return { used, remainder: Math.max(0, Math.round(remaining * 100) / 100) };
+}
+
+function platesUpdate() {
+  const resultEl = document.getElementById("platesResult");
+  if (!resultEl) return;
+  const unit = document.querySelector("[data-plates-unit].active")?.dataset.platesUnit || "lb";
+  const total = parseFloat(document.getElementById("platesTotal").value);
+  const bar = parseFloat(document.getElementById("platesBarWeight").value) || 0;
+  if (!total || total <= bar) {
+    resultEl.innerHTML = `<p style="color:var(--txt-dim);font-size:13px;">Ingresa el peso total (mayor al de la barra).</p>`;
+    return;
+  }
+  const { used, remainder } = calcPlatesPerSide((total - bar) / 2, unit);
+  if (used.length === 0) {
+    resultEl.innerHTML = `<p style="color:var(--txt-dim);font-size:13px;">Ese peso ya lo da la barra sola.</p>`;
+    return;
+  }
+  resultEl.innerHTML = `
+    <div style="font-size:14px;margin-bottom:4px;">Por lado: <strong style="color:var(--accent);">${used.join(" + ")} ${unit}</strong></div>
+    ${remainder > 0 ? `<div style="font-size:11.5px;color:var(--txt-dim);">No ajusta exacto — sobran ${remainder}${unit} por lado.</div>` : ""}
+  `;
+}
+
+function platesRender() {
+  const body = document.getElementById("platesBody");
+  body.innerHTML = `
+    <div class="card" style="margin-bottom:14px;">
+      <div style="font-size:13px;font-weight:700;color:var(--accent);margin-bottom:8px;">Peso total en la barra</div>
+      <div class="form-row" style="margin-bottom:8px;">
+        <input class="input" type="number" inputmode="decimal" placeholder="Peso total" id="platesTotal">
+        <div class="unit-toggle">
+          <button class="unit-btn active" data-plates-unit="lb">lb</button>
+          <button class="unit-btn" data-plates-unit="kg">kg</button>
+        </div>
+      </div>
+      <input class="input-full" type="number" inputmode="decimal" id="platesBarWeight" placeholder="Peso de la barra" value="45" style="margin-bottom:10px;">
+      <div id="platesResult"></div>
+    </div>
+    <div class="card">
+      <div style="font-size:13px;font-weight:700;color:var(--accent);margin-bottom:8px;">Convertir lb ⇄ kg</div>
+      <div class="form-row">
+        <input class="input" type="number" inputmode="decimal" id="convLb" placeholder="lb">
+        <input class="input" type="number" inputmode="decimal" id="convKg" placeholder="kg">
+      </div>
+    </div>
+  `;
+  body.querySelectorAll("[data-plates-unit]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      body.querySelectorAll("[data-plates-unit]").forEach((b) => b.classList.remove("active"));
+      btn.classList.add("active");
+      document.getElementById("platesBarWeight").value = btn.dataset.platesUnit === "kg" ? "20" : "45";
+      platesUpdate();
+    });
+  });
+  document.getElementById("platesTotal").addEventListener("input", platesUpdate);
+  document.getElementById("platesBarWeight").addEventListener("input", platesUpdate);
+  const lbInput = document.getElementById("convLb");
+  const kgInput = document.getElementById("convKg");
+  lbInput.addEventListener("input", () => {
+    kgInput.value = lbInput.value === "" ? "" : Math.round((parseFloat(lbInput.value) / LB_PER_KG) * 100) / 100;
+  });
+  kgInput.addEventListener("input", () => {
+    lbInput.value = kgInput.value === "" ? "" : Math.round((parseFloat(kgInput.value) * LB_PER_KG) * 100) / 100;
+  });
+  platesUpdate();
+}
+document.getElementById("platesCloseBtn").addEventListener("click", () => {
+  document.getElementById("platesModal").classList.add("hidden");
+});
+
+// ---------- Copia de seguridad (backup/restore) en JSON ----------
+function backupExportJSON() {
+  const payload = { version: 1, exportedAt: new Date().toISOString(), routine, logs, bodyweightLog, linkMap };
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `Bitacora_Backup_${todayISO()}.json`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+  showToast("Copia de seguridad descargada");
+}
+async function backupRestoreFromFile(file) {
+  try {
+    const data = JSON.parse(await file.text());
+    if (!data || typeof data !== "object" || !data.routine || !data.logs) { showToast("Archivo de copia inválido"); return; }
+    if (!confirm("Esto reemplaza TODA la rutina, registros, peso corporal y vínculos actuales por los del archivo. ¿Continuar?")) return;
+    routine = data.routine;
+    logs = data.logs || {};
+    bodyweightLog = data.bodyweightLog || [];
+    linkMap = data.linkMap || {};
+    saveRoutine(); saveLogs(); saveBodyweight(); saveLinkMap();
+    activeDay = Object.keys(routine)[0];
+    render();
+    document.getElementById("backupModal").classList.add("hidden");
+    showToast("Copia de seguridad restaurada");
+  } catch (e) {
+    showToast("No se pudo leer el archivo");
+  }
+}
+document.getElementById("backupExportBtn").addEventListener("click", backupExportJSON);
+document.getElementById("backupImportBtn").addEventListener("click", () => document.getElementById("backupFile").click());
+document.getElementById("backupFile").addEventListener("change", (e) => {
+  const file = e.target.files[0];
+  if (file) backupRestoreFromFile(file);
+  e.target.value = "";
+});
+document.getElementById("backupCloseBtn").addEventListener("click", () => {
+  document.getElementById("backupModal").classList.add("hidden");
+});
+
+// ---------- Vista Diario (todo lo registrado en una fecha) ----------
+let diarySelectedDate = todayISO();
+function diaryEntriesForDate(iso) {
+  const defs = allExercisesFlat();
+  const results = [];
+  Object.entries(logs).forEach(([key, arr]) => {
+    arr.forEach((entry) => {
+      if (entry.date !== iso) return;
+      const ex = defs.find((e) => e.id === key);
+      results.push({ name: ex ? ex.name : key, dayLabel: entry.dayLabel || (ex ? ex.dayLabels.join(" y ") : ""), entry });
+    });
+  });
+  return results;
+}
+function diaryRenderList() {
+  const listEl = document.getElementById("diaryList");
+  const entries = diaryEntriesForDate(diarySelectedDate);
+  const bw = bodyweightLog.find((l) => l.date === diarySelectedDate);
+  if (entries.length === 0 && !bw) {
+    listEl.innerHTML = `<p style="font-size:13px;color:var(--txt-dim);">Nada registrado ese día.</p>`;
+    return;
+  }
+  listEl.innerHTML = `
+    ${bw ? `<div class="card" style="margin-bottom:8px;padding:10px;"><span style="font-size:12px;color:var(--txt-dim);">Peso corporal</span> — <strong style="color:var(--accent);">${bw.weight}${bw.unit}</strong></div>` : ""}
+    ${entries.map((r) => `
+      <div class="card" style="margin-bottom:8px;padding:10px;">
+        <div style="font-size:13px;font-weight:600;">${esc(r.name)}</div>
+        <div style="display:flex;justify-content:space-between;font-size:12px;color:var(--txt-dim);margin-top:2px;">
+          <span>${esc(r.dayLabel)}</span>
+          <span style="color:var(--accent);font-weight:700;">${r.entry.weight}${r.entry.unit} × ${r.entry.reps}r</span>
+        </div>
+        ${r.entry.notes ? `<div style="font-size:11.5px;color:var(--txt-dim);font-style:italic;margin-top:4px;">${esc(r.entry.notes)}</div>` : ""}
+      </div>
+    `).join("")}
+  `;
+}
+function diaryRender() {
+  const body = document.getElementById("diaryBody");
+  body.innerHTML = `
+    <input class="input-full" type="date" id="diaryDate" value="${diarySelectedDate}" style="margin-bottom:14px;">
+    <div id="diaryList"></div>
+  `;
+  document.getElementById("diaryDate").addEventListener("change", (e) => {
+    diarySelectedDate = e.target.value || todayISO();
+    diaryRenderList();
+  });
+  diaryRenderList();
+}
+document.getElementById("diaryCloseBtn").addEventListener("click", () => {
+  document.getElementById("diaryModal").classList.add("hidden");
 });
 
 // ---------- Import / Export Excel ----------
