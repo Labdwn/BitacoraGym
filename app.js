@@ -4,7 +4,7 @@ const DEFAULT_ROUTINE = {
     label: "Día 1",
     focus: "Upper A — Pectoral superior + espalda grosor",
     exercises: [
-      { id: "d1e1", name: "Press inclinado con mancuernas", target: "4x6-8", rest: "2-3 min", equip: "Mancuernas" },
+      { id: "d1e1", name: "Press inclinado con mancuernas", target: "4x6-8", rest: "2-3 min", equip: "Mancuernas", canonicalId: "cx_press_inclinado" },
       { id: "d1e2", name: "Press plano en máquina", target: "3x10-12", rest: "90 seg", equip: "Máquina" },
       { id: "d1e3", name: "Remo con barra (Pendlay)", target: "4x8-10", rest: "2-3 min", equip: "Barra libre" },
       { id: "d1e4", name: "Press militar con mancuernas", target: "3x8-10", rest: "2 min", equip: "Mancuernas" },
@@ -30,7 +30,7 @@ const DEFAULT_ROUTINE = {
     label: "Día 3",
     focus: "Upper B — Pectoral superior + espalda ancho",
     exercises: [
-      { id: "d3e1", name: "Press inclinado con barra o unilateral", target: "4x8-10", rest: "2 min", equip: "Barra / Mancuerna" },
+      { id: "d3e1", name: "Press inclinado con mancuernas (variante Día 3)", target: "4x8-10", rest: "2 min", equip: "Mancuernas", canonicalId: "cx_press_inclinado" },
       { id: "d3e2", name: "Aperturas o pec deck", target: "3x12-15", rest: "90 seg", equip: "Pec deck" },
       { id: "d3e3", name: "Dominadas (lastre al superar 12 reps)", target: "4x6-10", rest: "2-3 min", equip: "Peso corporal / lastre" },
       { id: "d3e4", name: "Remo T o mancuerna a un brazo", target: "3x10-12", rest: "2 min", equip: "Máquina remo T" },
@@ -57,12 +57,10 @@ const DEFAULT_ROUTINE = {
 const RK = "bitacora_rutina_v1";
 const LK = "bitacora_logs_v1";
 const BWK = "bitacora_bodyweight_v1";
-const LNK = "bitacora_linkmap_v1"; // vínculos manuales entre ejercicios (anulan canonicalId)
 
 let routine = loadJSON(RK, DEFAULT_ROUTINE);
 let logs = loadJSON(LK, {});
 let bodyweightLog = loadJSON(BWK, []); // [{id, date, weight, unit, notes, synced}]
-let linkMap = loadJSON(LNK, {}); // { exId: groupKey } — se edita desde "Vincular ejercicios"
 let activeDay = Object.keys(routine)[0];
 migrateCanonicalLogs(); // one-time: merges old per-day history into shared canonical keys
 let editMode = false;
@@ -94,26 +92,40 @@ function saveLogs() {
 function saveBodyweight() {
   try { localStorage.setItem(BWK, JSON.stringify(bodyweightLog)); } catch (e) { showToast("No se pudo guardar"); }
 }
-function todayISO() { return new Date().toISOString().slice(0, 10); }
+// Local date (NOT toISOString, which is UTC and returns tomorrow after ~6pm in Costa Rica).
+function todayISO() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
 // Some exercises are the literal same movement done on two different days (e.g. "Sentadilla
 // hack" as primary on Day 4 and secondary on Day 2). Those share a canonicalId so their
 // weight/reps history and PRs are tracked as ONE continuous progression, not two separate ones.
-function logKey(ex) {
-  // Un vínculo manual (pantalla "Vincular ejercicios") siempre gana sobre el canonicalId
-  // fijo del código — así vincular o desvincular nunca requiere tocar app.js.
-  if (Object.prototype.hasOwnProperty.call(linkMap, ex.id)) return linkMap[ex.id];
-  return ex.canonicalId || ex.id;
-}
-function saveLinkMap() {
-  try { localStorage.setItem(LNK, JSON.stringify(linkMap)); } catch (e) { showToast("No se pudo guardar"); }
-}
+function logKey(ex) { return ex.canonicalId || ex.id; }
 
 // One-time migration: some exercises used to have separate per-day histories (e.g. "Sentadilla
 // hack" logged under a Day 2 id and a Day 4 id) that now share one canonicalId. Without this,
 // that old history would look like it "disappeared" since the app now reads from the shared key.
+const CANONICAL_ID_MAP = {
+  d2e1: "cx_rdl", d4e2: "cx_rdl",
+  d2e2: "cx_sentadilla_hack", d4e1: "cx_sentadilla_hack",
+  d2e6: "cx_abdomen_declinado", d4e6: "cx_abdomen_declinado",
+  d1e1: "cx_press_inclinado", d3e1: "cx_press_inclinado",
+};
+// Routines already saved in localStorage predate these tags, so stamp them by exercise id.
+function patchKnownCanonicalPairs() {
+  let changed = false;
+  Object.values(routine).forEach((day) => {
+    day.exercises.forEach((ex) => {
+      const cid = CANONICAL_ID_MAP[ex.id];
+      if (cid && ex.canonicalId !== cid) { ex.canonicalId = cid; changed = true; }
+    });
+  });
+  if (changed) saveRoutine();
+}
 function migrateCanonicalLogs() {
-  const MIGRATION_FLAG = "bitacora_canonical_migration_v1";
+  const MIGRATION_FLAG = "bitacora_canonical_migration_v2";
   if (localStorage.getItem(MIGRATION_FLAG)) return;
+  patchKnownCanonicalPairs();
   let changed = false;
   Object.values(routine).forEach((day) => {
     day.exercises.forEach((ex) => {
@@ -511,8 +523,15 @@ function gsUpdateStatus() {
 // behaves inconsistently across mobile browsers. A plain redirect to Google's own login
 // page and back is the oldest, most universally compatible way to get an access token,
 // since it's just a normal page navigation, not a JS-managed popup.
+//
+// Fixed on purpose (not computed from window.location): depending on whether the app is
+// opened from the installed home-screen icon vs a normal browser tab, the real URL can
+// resolve differently (".../BitacoraGym/" vs ".../BitacoraGym/index.html"), and Google
+// requires an EXACT character-for-character match with what's registered as an Authorized
+// redirect URI — a mismatch here is what "Error 400: redirect_uri_mismatch" means.
+const GS_REDIRECT_URI = "https://labdwn.github.io/BitacoraGym/";
 function gsRedirectUri() {
-  return window.location.origin + window.location.pathname;
+  return GS_REDIRECT_URI;
 }
 function gsBuildAuthUrl(promptVal) {
   const params = new URLSearchParams({
@@ -903,48 +922,6 @@ async function gsDeleteRow(dayLabel, exName, entry) {
     // silent — the local delete already succeeded, this is just best-effort cleanup in Sheets
   }
 }
-// Trae la estructura (nombres/series/descanso/equipo) desde la hoja "Rutina (estructura)" y la
-// aplica localmente. Empareja por posición dentro de cada día (mismo orden en que se escribe
-// en gsSyncRoutineStructure), no por id — la hoja no guarda ids. Si el número de ejercicios de
-// ese día no coincide con lo local, se salta ese día entero para no asignar un nombre al
-// ejercicio equivocado (típicamente pasa si agregaste/quitaste un ejercicio en otro dispositivo
-// sin sincronizar todavía).
-async function gsPullRoutineStructure(silent) {
-  if (!gsClientId || !gsSpreadsheetId || !gsAccessToken) return { applied: 0 };
-  try {
-    const res = await gsFetch(
-      `https://sheets.googleapis.com/v4/spreadsheets/${gsSpreadsheetId}/values/${encodeURIComponent(GS_ROUTINE_SHEET)}!A2:E100000`
-    );
-    if (!res.ok) return { applied: 0 };
-    const data = await res.json();
-    const byDay = {};
-    (data.values || []).forEach((row) => {
-      const [dayLabel, name, target, rest, equip] = row;
-      if (!dayLabel || !name) return;
-      (byDay[dayLabel] = byDay[dayLabel] || []).push({
-        name: name.trim(), target: (target || "").trim(), rest: (rest || "").trim(), equip: (equip || "").trim(),
-      });
-    });
-
-    let applied = 0;
-    Object.values(routine).forEach((day) => {
-      const sheetRows = byDay[day.label];
-      if (!sheetRows || sheetRows.length !== day.exercises.length) return;
-      day.exercises.forEach((ex, i) => {
-        const r = sheetRows[i];
-        if (ex.name !== r.name || ex.target !== r.target || ex.rest !== r.rest || (ex.equip || "") !== r.equip) {
-          ex.name = r.name; ex.target = r.target; ex.rest = r.rest; ex.equip = r.equip;
-          applied++;
-        }
-      });
-    });
-    if (applied > 0) { saveRoutine(); render(); }
-    return { applied };
-  } catch (e) {
-    if (!silent) showToast("No se pudo traer la estructura de la rutina");
-    return { applied: 0 };
-  }
-}
 
 async function gsPullAll(silent) {
   if (!gsClientId || !gsSpreadsheetId) return { pulled: 0 };
@@ -967,11 +944,6 @@ async function gsPullAll(silent) {
     if (!metaRes.ok) throw new Error("meta-failed");
     const meta = await metaRes.json();
     const sheetTitles = (meta.sheets || []).map((s) => s.properties.title);
-
-    // Trae también los nombres/series/descanso/equipo antes de armar el índice de nombres,
-    // para que el emparejamiento de registros use la versión más reciente.
-    await gsPullRoutineStructure(true);
-
     const nameIndex = buildNameIndex();
 
     for (const title of sheetTitles) {
@@ -1324,7 +1296,8 @@ function statsRenderExerciseChart(exId) {
 }
 
 function statsWeeksAgo(dateISO) {
-  const d = new Date(dateISO);
+  const [yy, mm, dd] = dateISO.split("-").map(Number);
+  const d = new Date(yy, mm - 1, dd); // local midnight, not UTC
   const now = new Date();
   return Math.floor((now - d) / (7 * 24 * 60 * 60 * 1000));
 }
@@ -1633,468 +1606,6 @@ document.getElementById("btnBodyweight").addEventListener("click", () => {
 });
 document.getElementById("bwCloseBtn").addEventListener("click", () => {
   document.getElementById("bwModal").classList.add("hidden");
-});
-// ---------- Vincular ejercicios manualmente (anula canonicalId desde el sitio) ----------
-
-// Une dos ejercicios (o los suma a un grupo ya vinculado) para que compartan un solo
-// historial. Si cualquiera de los dos ya tenía registros propios, se fusionan sin duplicar.
-function linkExercises(idA, idB) {
-  if (idA === idB) return;
-  const defs = allExerciseDefinitionsFlat();
-  const exA = defs.find((e) => e.id === idA);
-  const exB = defs.find((e) => e.id === idB);
-  if (!exA || !exB) return;
-
-  const keyA = logKey(exA);
-  const keyB = logKey(exB);
-  if (keyA === keyB) { showToast("Ya están vinculados"); return; }
-
-  const groupIds = [...new Set(defs.filter((e) => logKey(e) === keyA || logKey(e) === keyB).map((e) => e.id))];
-  const newKey = keyA;
-
-  const entriesA = logs[keyA] || [];
-  const entriesB = logs[keyB] || [];
-  const merged = entriesA.slice();
-  entriesB.forEach((entry) => {
-    const dup = merged.some((e) => e.date === entry.date && e.weight === entry.weight && e.unit === entry.unit && e.reps === entry.reps && (e.equip || "") === (entry.equip || ""));
-    if (!dup) merged.push(entry);
-  });
-  logs[newKey] = merged;
-  if (keyB !== newKey) delete logs[keyB];
-
-  groupIds.forEach((id) => {
-    const ex = defs.find((e) => e.id === id);
-    const natural = ex.canonicalId || ex.id;
-    if (natural === newKey) delete linkMap[id];
-    else linkMap[id] = newKey;
-  });
-
-  saveLinkMap();
-  saveLogs();
-  showToast("Ejercicios vinculados");
-  render();
-}
-
-// Saca UN ejercicio de su grupo. Sus propios registros (identificados por el dayLabel con
-// que se guardaron) se separan; el resto del grupo sigue compartiendo historial.
-function unlinkSingle(exId) {
-  const defs = allExerciseDefinitionsFlat();
-  const ex = defs.find((e) => e.id === exId);
-  if (!ex) return;
-  const groupKey = logKey(ex);
-  const members = defs.filter((e) => logKey(e) === groupKey);
-  if (members.length <= 1) return;
-
-  const standaloneKey = ex.id;
-  linkMap[exId] = standaloneKey;
-
-  const groupEntries = logs[groupKey] || [];
-  const mine = groupEntries.filter((e) => e.dayLabel === ex.dayLabel);
-  const rest = groupEntries.filter((e) => e.dayLabel !== ex.dayLabel);
-  logs[groupKey] = rest;
-  logs[standaloneKey] = (logs[standaloneKey] || []).concat(mine);
-
-  saveLinkMap();
-  saveLogs();
-  showToast("Ejercicio desvinculado");
-  render();
-  linksRender();
-}
-
-// Desarma un grupo completo: cada ejercicio recupera su propio historial (por dayLabel).
-function unlinkGroup(groupKey) {
-  const defs = allExerciseDefinitionsFlat();
-  const members = defs.filter((e) => logKey(e) === groupKey);
-  if (members.length <= 1) return;
-  const groupEntries = logs[groupKey] || [];
-
-  members.forEach((ex) => {
-    linkMap[ex.id] = ex.id;
-    const mine = groupEntries.filter((e) => e.dayLabel === ex.dayLabel);
-    logs[ex.id] = (logs[ex.id] || []).concat(mine);
-  });
-  const claimedDays = new Set(members.map((m) => m.dayLabel));
-  const leftover = groupEntries.filter((e) => !claimedDays.has(e.dayLabel));
-  if (leftover.length > 0) logs[members[0].id] = (logs[members[0].id] || []).concat(leftover);
-  delete logs[groupKey];
-
-  saveLinkMap();
-  saveLogs();
-  showToast("Grupo desvinculado");
-  render();
-  linksRender();
-}
-
-function linksRender() {
-  const body = document.getElementById("linksBody");
-  const defs = allExerciseDefinitionsFlat();
-
-  const groups = {};
-  defs.forEach((ex) => { (groups[logKey(ex)] = groups[logKey(ex)] || []).push(ex); });
-  const linkedGroups = Object.entries(groups).filter(([, members]) => members.length > 1);
-
-  const groupsHTML = linkedGroups.length === 0
-    ? `<p style="font-size:13px;color:var(--txt-dim);margin-bottom:16px;">Aún no hay ejercicios vinculados.</p>`
-    : linkedGroups.map(([key, members]) => `
-        <div class="card" style="margin-bottom:10px;">
-          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
-            <span style="font-size:12px;color:var(--txt-dim);">Comparten historial</span>
-            <button class="hist-btn" data-unlink-group="${esc(key)}">Desvincular grupo</button>
-          </div>
-          ${members.map((m) => `
-            <div style="display:flex;align-items:center;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--line);">
-              <div>
-                <div style="font-size:13px;font-weight:600;">${esc(m.name)}</div>
-                <div style="font-size:11px;color:var(--txt-dim);">${esc(m.dayLabel)}</div>
-              </div>
-              <button class="hist-btn" data-unlink-id="${m.id}">Quitar</button>
-            </div>
-          `).join("")}
-        </div>
-      `).join("");
-
-  const options = defs.map((ex) => `<option value="${ex.id}">${esc(ex.dayLabel)} — ${esc(ex.name)}</option>`).join("");
-
-  body.innerHTML = `
-    <p style="font-size:13px;color:var(--txt-dim);margin-bottom:14px;">
-      Vincula dos ejercicios que sean el mismo movimiento (p. ej. repetido en dos días) para que compartan un único historial de peso y reps.
-    </p>
-    <div style="font-size:13px;font-weight:700;color:var(--accent);margin-bottom:8px;">Grupos vinculados</div>
-    ${groupsHTML}
-    <div style="font-size:13px;font-weight:700;color:var(--accent);margin:20px 0 8px;">Vincular nuevos</div>
-    <select id="linkSelA" class="input-full" style="margin-bottom:8px;">${options}</select>
-    <select id="linkSelB" class="input-full" style="margin-bottom:10px;">${options}</select>
-    <button class="save-btn" id="linkGoBtn">Vincular estos dos</button>
-  `;
-
-  body.querySelectorAll("[data-unlink-id]").forEach((btn) => {
-    btn.addEventListener("click", () => unlinkSingle(btn.dataset.unlinkId));
-  });
-  body.querySelectorAll("[data-unlink-group]").forEach((btn) => {
-    btn.addEventListener("click", () => unlinkGroup(btn.dataset.unlinkGroup));
-  });
-  document.getElementById("linkGoBtn").addEventListener("click", () => {
-    const idA = document.getElementById("linkSelA").value;
-    const idB = document.getElementById("linkSelB").value;
-    if (idA === idB) { showToast("Elige dos ejercicios distintos"); return; }
-    linkExercises(idA, idB);
-    linksRender();
-  });
-}
-
-document.getElementById("btnLinks").addEventListener("click", () => {
-  document.getElementById("linksModal").classList.remove("hidden");
-  linksRender();
-});
-document.getElementById("linksCloseBtn").addEventListener("click", () => {
-  document.getElementById("linksModal").classList.add("hidden");
-});
-
-// ---------- Menú "Más opciones" (agrupa lo de uso poco frecuente) ----------
-function closeMoreMenu() { document.getElementById("moreModal").classList.add("hidden"); }
-
-document.getElementById("btnMore").addEventListener("click", () => {
-  document.getElementById("moreModal").classList.remove("hidden");
-});
-document.getElementById("moreCloseBtn").addEventListener("click", closeMoreMenu);
-document.getElementById("moreBulk").addEventListener("click", () => {
-  closeMoreMenu();
-  document.getElementById("bulkModal").classList.remove("hidden");
-  bulkRender();
-});
-document.getElementById("moreBodyweight").addEventListener("click", () => {
-  closeMoreMenu();
-  document.getElementById("btnBodyweight").click();
-});
-document.getElementById("moreImport").addEventListener("click", () => {
-  closeMoreMenu();
-  document.getElementById("btnImport").click();
-});
-document.getElementById("moreExport").addEventListener("click", () => {
-  closeMoreMenu();
-  document.getElementById("btnExport").click();
-});
-document.getElementById("moreLinks").addEventListener("click", () => {
-  closeMoreMenu();
-  document.getElementById("btnLinks").click();
-});
-document.getElementById("morePlates").addEventListener("click", () => {
-  closeMoreMenu();
-  document.getElementById("platesModal").classList.remove("hidden");
-  platesRender();
-});
-document.getElementById("moreBackup").addEventListener("click", () => {
-  closeMoreMenu();
-  document.getElementById("backupModal").classList.remove("hidden");
-});
-document.getElementById("moreDiary").addEventListener("click", () => {
-  closeMoreMenu();
-  document.getElementById("diaryModal").classList.remove("hidden");
-  diaryRender();
-});
-
-// ---------- Registro en masa (poner al día varios ejercicios de un día de un jalón) ----------
-function bulkRenderExercises() {
-  const dayKey = document.getElementById("bulkDaySelect").value;
-  const day = routine[dayKey];
-  const listEl = document.getElementById("bulkExList");
-  if (!day) { listEl.innerHTML = ""; return; }
-  listEl.innerHTML = day.exercises.map((ex) => {
-    const last = sortByDateDesc(logs[logKey(ex)] || [])[0];
-    return `
-    <div class="card" data-bulk-id="${ex.id}" style="margin-bottom:10px;">
-      <div class="ex-name" style="margin-bottom:8px;">${esc(ex.name)}</div>
-      <div class="form-row" style="margin-bottom:6px;">
-        <input class="input" type="number" inputmode="decimal" placeholder="Peso" data-bulk-field="weight" value="${last ? last.weight : ""}">
-        <div class="unit-toggle">
-          <button class="unit-btn ${(!last || last.unit === "lb") ? "active" : ""}" data-bulk-unit="lb">lb</button>
-          <button class="unit-btn ${(last && last.unit === "kg") ? "active" : ""}" data-bulk-unit="kg">kg</button>
-        </div>
-        <input class="input" type="number" inputmode="numeric" placeholder="Reps" data-bulk-field="reps" value="${last ? last.reps : ""}">
-      </div>
-      <input class="input-full" placeholder="Equipo (opcional)" data-bulk-field="equip" style="margin-bottom:6px;">
-      <input class="input-full" placeholder="Notas (opcional)" data-bulk-field="notes">
-    </div>`;
-  }).join("");
-  listEl.querySelectorAll("[data-bulk-unit]").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      const row = btn.closest("[data-bulk-id]");
-      row.querySelectorAll("[data-bulk-unit]").forEach((b) => b.classList.remove("active"));
-      btn.classList.add("active");
-    });
-  });
-}
-
-function bulkSaveAll() {
-  const dayKey = document.getElementById("bulkDaySelect").value;
-  const date = document.getElementById("bulkDate").value || todayISO();
-  const day = routine[dayKey];
-  if (!day) return;
-  let saved = 0, prs = 0;
-  day.exercises.forEach((ex) => {
-    const row = document.querySelector(`#bulkExList [data-bulk-id="${ex.id}"]`);
-    if (!row) return;
-    const weight = row.querySelector('[data-bulk-field="weight"]').value;
-    const reps = row.querySelector('[data-bulk-field="reps"]').value;
-    if (!weight || !reps) return; // vacío = no se registra ese ejercicio esta vez
-    const equip = row.querySelector('[data-bulk-field="equip"]').value;
-    const notes = row.querySelector('[data-bulk-field="notes"]').value;
-    const unit = row.querySelector("[data-bulk-unit].active")?.dataset.bulkUnit || "lb";
-    const weightNum = parseFloat(weight);
-    const key = logKey(ex);
-    const priorEntries = logs[key] || [];
-    const priorMax = priorEntries.reduce((max, l) => Math.max(max, l.weight), 0);
-    if (priorEntries.length > 0 && weightNum > priorMax) prs++;
-    const entry = {
-      id: `bulk_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
-      date, weight: weightNum, unit, reps: parseInt(reps, 10),
-      equip: equip.trim(), notes: notes.trim(), synced: false, dayLabel: day.label,
-    };
-    logs[key] = [entry, ...priorEntries];
-    saved++;
-    gsAppendRow(day.label, key, entry.id, [ex.name, entry.date, entry.weight, entry.unit, entry.reps, entry.equip, entry.notes]);
-  });
-  if (saved === 0) { showToast("No llenaste ningún ejercicio"); return; }
-  saveLogs();
-  render();
-  showToast(`${saved} registro${saved !== 1 ? "s" : ""} guardado${saved !== 1 ? "s" : ""}${prs > 0 ? ` (🏆 ${prs} PR${prs !== 1 ? "s" : ""})` : ""}`);
-  bulkRenderExercises(); // refresca con lo recién guardado — listo para seguir con otro día/fecha
-}
-
-function bulkRender() {
-  const body = document.getElementById("bulkBody");
-  const dayOptions = Object.entries(routine).map(([k, d]) => `<option value="${k}">${esc(d.label)} — ${esc(d.focus)}</option>`).join("");
-  body.innerHTML = `
-    <input class="input-full" type="date" id="bulkDate" value="${todayISO()}" style="margin-bottom:10px;">
-    <select id="bulkDaySelect" class="input-full" style="margin-bottom:14px;">${dayOptions}</select>
-    <div id="bulkExList"></div>
-    <button class="save-btn" id="bulkSaveBtn" style="margin-top:6px;">&#10003; Guardar todos los llenos</button>
-    <p style="font-size:11.5px;color:var(--txt-dim);margin-top:8px;text-align:center;">Deja en blanco los ejercicios que no quieras registrar — solo se guardan los que tengan peso y reps.</p>
-  `;
-  document.getElementById("bulkDaySelect").addEventListener("change", bulkRenderExercises);
-  document.getElementById("bulkSaveBtn").addEventListener("click", bulkSaveAll);
-  bulkRenderExercises();
-}
-document.getElementById("bulkCloseBtn").addEventListener("click", () => {
-  document.getElementById("bulkModal").classList.add("hidden");
-});
-
-// ---------- Calculadora de discos + conversor lb/kg ----------
-const PLATES_LB = [45, 35, 25, 10, 5, 2.5];
-const PLATES_KG = [20, 15, 10, 5, 2.5, 1.25];
-const LB_PER_KG = 2.20462;
-
-function calcPlatesPerSide(perSideWeight, unit) {
-  const plates = unit === "kg" ? PLATES_KG : PLATES_LB;
-  let remaining = Math.round(perSideWeight * 100) / 100;
-  const used = [];
-  for (const p of plates) {
-    while (remaining >= p - 0.001) { used.push(p); remaining -= p; }
-  }
-  return { used, remainder: Math.max(0, Math.round(remaining * 100) / 100) };
-}
-
-function platesUpdate() {
-  const resultEl = document.getElementById("platesResult");
-  if (!resultEl) return;
-  const unit = document.querySelector("[data-plates-unit].active")?.dataset.platesUnit || "lb";
-  const total = parseFloat(document.getElementById("platesTotal").value);
-  const bar = parseFloat(document.getElementById("platesBarWeight").value) || 0;
-  if (!total || total <= bar) {
-    resultEl.innerHTML = `<p style="color:var(--txt-dim);font-size:13px;">Ingresa el peso total (mayor al de la barra).</p>`;
-    return;
-  }
-  const { used, remainder } = calcPlatesPerSide((total - bar) / 2, unit);
-  if (used.length === 0) {
-    resultEl.innerHTML = `<p style="color:var(--txt-dim);font-size:13px;">Ese peso ya lo da la barra sola.</p>`;
-    return;
-  }
-  resultEl.innerHTML = `
-    <div style="font-size:14px;margin-bottom:4px;">Por lado: <strong style="color:var(--accent);">${used.join(" + ")} ${unit}</strong></div>
-    ${remainder > 0 ? `<div style="font-size:11.5px;color:var(--txt-dim);">No ajusta exacto — sobran ${remainder}${unit} por lado.</div>` : ""}
-  `;
-}
-
-function platesRender() {
-  const body = document.getElementById("platesBody");
-  body.innerHTML = `
-    <div class="card" style="margin-bottom:14px;">
-      <div style="font-size:13px;font-weight:700;color:var(--accent);margin-bottom:8px;">Peso total en la barra</div>
-      <div class="form-row" style="margin-bottom:8px;">
-        <input class="input" type="number" inputmode="decimal" placeholder="Peso total" id="platesTotal">
-        <div class="unit-toggle">
-          <button class="unit-btn active" data-plates-unit="lb">lb</button>
-          <button class="unit-btn" data-plates-unit="kg">kg</button>
-        </div>
-      </div>
-      <input class="input-full" type="number" inputmode="decimal" id="platesBarWeight" placeholder="Peso de la barra" value="45" style="margin-bottom:10px;">
-      <div id="platesResult"></div>
-    </div>
-    <div class="card">
-      <div style="font-size:13px;font-weight:700;color:var(--accent);margin-bottom:8px;">Convertir lb ⇄ kg</div>
-      <div class="form-row">
-        <input class="input" type="number" inputmode="decimal" id="convLb" placeholder="lb">
-        <input class="input" type="number" inputmode="decimal" id="convKg" placeholder="kg">
-      </div>
-    </div>
-  `;
-  body.querySelectorAll("[data-plates-unit]").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      body.querySelectorAll("[data-plates-unit]").forEach((b) => b.classList.remove("active"));
-      btn.classList.add("active");
-      document.getElementById("platesBarWeight").value = btn.dataset.platesUnit === "kg" ? "20" : "45";
-      platesUpdate();
-    });
-  });
-  document.getElementById("platesTotal").addEventListener("input", platesUpdate);
-  document.getElementById("platesBarWeight").addEventListener("input", platesUpdate);
-  const lbInput = document.getElementById("convLb");
-  const kgInput = document.getElementById("convKg");
-  lbInput.addEventListener("input", () => {
-    kgInput.value = lbInput.value === "" ? "" : Math.round((parseFloat(lbInput.value) / LB_PER_KG) * 100) / 100;
-  });
-  kgInput.addEventListener("input", () => {
-    lbInput.value = kgInput.value === "" ? "" : Math.round((parseFloat(kgInput.value) * LB_PER_KG) * 100) / 100;
-  });
-  platesUpdate();
-}
-document.getElementById("platesCloseBtn").addEventListener("click", () => {
-  document.getElementById("platesModal").classList.add("hidden");
-});
-
-// ---------- Copia de seguridad (backup/restore) en JSON ----------
-function backupExportJSON() {
-  const payload = { version: 1, exportedAt: new Date().toISOString(), routine, logs, bodyweightLog, linkMap };
-  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = `Bitacora_Backup_${todayISO()}.json`;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  URL.revokeObjectURL(url);
-  showToast("Copia de seguridad descargada");
-}
-async function backupRestoreFromFile(file) {
-  try {
-    const data = JSON.parse(await file.text());
-    if (!data || typeof data !== "object" || !data.routine || !data.logs) { showToast("Archivo de copia inválido"); return; }
-    if (!confirm("Esto reemplaza TODA la rutina, registros, peso corporal y vínculos actuales por los del archivo. ¿Continuar?")) return;
-    routine = data.routine;
-    logs = data.logs || {};
-    bodyweightLog = data.bodyweightLog || [];
-    linkMap = data.linkMap || {};
-    saveRoutine(); saveLogs(); saveBodyweight(); saveLinkMap();
-    activeDay = Object.keys(routine)[0];
-    render();
-    document.getElementById("backupModal").classList.add("hidden");
-    showToast("Copia de seguridad restaurada");
-  } catch (e) {
-    showToast("No se pudo leer el archivo");
-  }
-}
-document.getElementById("backupExportBtn").addEventListener("click", backupExportJSON);
-document.getElementById("backupImportBtn").addEventListener("click", () => document.getElementById("backupFile").click());
-document.getElementById("backupFile").addEventListener("change", (e) => {
-  const file = e.target.files[0];
-  if (file) backupRestoreFromFile(file);
-  e.target.value = "";
-});
-document.getElementById("backupCloseBtn").addEventListener("click", () => {
-  document.getElementById("backupModal").classList.add("hidden");
-});
-
-// ---------- Vista Diario (todo lo registrado en una fecha) ----------
-let diarySelectedDate = todayISO();
-function diaryEntriesForDate(iso) {
-  const defs = allExercisesFlat();
-  const results = [];
-  Object.entries(logs).forEach(([key, arr]) => {
-    arr.forEach((entry) => {
-      if (entry.date !== iso) return;
-      const ex = defs.find((e) => e.id === key);
-      results.push({ name: ex ? ex.name : key, dayLabel: entry.dayLabel || (ex ? ex.dayLabels.join(" y ") : ""), entry });
-    });
-  });
-  return results;
-}
-function diaryRenderList() {
-  const listEl = document.getElementById("diaryList");
-  const entries = diaryEntriesForDate(diarySelectedDate);
-  const bw = bodyweightLog.find((l) => l.date === diarySelectedDate);
-  if (entries.length === 0 && !bw) {
-    listEl.innerHTML = `<p style="font-size:13px;color:var(--txt-dim);">Nada registrado ese día.</p>`;
-    return;
-  }
-  listEl.innerHTML = `
-    ${bw ? `<div class="card" style="margin-bottom:8px;padding:10px;"><span style="font-size:12px;color:var(--txt-dim);">Peso corporal</span> — <strong style="color:var(--accent);">${bw.weight}${bw.unit}</strong></div>` : ""}
-    ${entries.map((r) => `
-      <div class="card" style="margin-bottom:8px;padding:10px;">
-        <div style="font-size:13px;font-weight:600;">${esc(r.name)}</div>
-        <div style="display:flex;justify-content:space-between;font-size:12px;color:var(--txt-dim);margin-top:2px;">
-          <span>${esc(r.dayLabel)}</span>
-          <span style="color:var(--accent);font-weight:700;">${r.entry.weight}${r.entry.unit} × ${r.entry.reps}r</span>
-        </div>
-        ${r.entry.notes ? `<div style="font-size:11.5px;color:var(--txt-dim);font-style:italic;margin-top:4px;">${esc(r.entry.notes)}</div>` : ""}
-      </div>
-    `).join("")}
-  `;
-}
-function diaryRender() {
-  const body = document.getElementById("diaryBody");
-  body.innerHTML = `
-    <input class="input-full" type="date" id="diaryDate" value="${diarySelectedDate}" style="margin-bottom:14px;">
-    <div id="diaryList"></div>
-  `;
-  document.getElementById("diaryDate").addEventListener("change", (e) => {
-    diarySelectedDate = e.target.value || todayISO();
-    diaryRenderList();
-  });
-  diaryRenderList();
-}
-document.getElementById("diaryCloseBtn").addEventListener("click", () => {
-  document.getElementById("diaryModal").classList.add("hidden");
 });
 
 // ---------- Import / Export Excel ----------
