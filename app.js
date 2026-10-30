@@ -54,6 +54,12 @@ const DEFAULT_ROUTINE = {
   },
 };
 
+const CANONICAL_ID_MAP = {
+  d2e1: "cx_rdl", d4e2: "cx_rdl",
+  d2e2: "cx_sentadilla_hack", d4e1: "cx_sentadilla_hack",
+  d2e6: "cx_abdomen_declinado", d4e6: "cx_abdomen_declinado",
+  d1e1: "cx_press_inclinado", d3e1: "cx_press_inclinado",
+};
 const RK = "bitacora_rutina_v1";
 const LK = "bitacora_logs_v1";
 const BWK = "bitacora_bodyweight_v1";
@@ -105,12 +111,6 @@ function logKey(ex) { return ex.canonicalId || ex.id; }
 // One-time migration: some exercises used to have separate per-day histories (e.g. "Sentadilla
 // hack" logged under a Day 2 id and a Day 4 id) that now share one canonicalId. Without this,
 // that old history would look like it "disappeared" since the app now reads from the shared key.
-const CANONICAL_ID_MAP = {
-  d2e1: "cx_rdl", d4e2: "cx_rdl",
-  d2e2: "cx_sentadilla_hack", d4e1: "cx_sentadilla_hack",
-  d2e6: "cx_abdomen_declinado", d4e6: "cx_abdomen_declinado",
-  d1e1: "cx_press_inclinado", d3e1: "cx_press_inclinado",
-};
 // Routines already saved in localStorage predate these tags, so stamp them by exercise id.
 function patchKnownCanonicalPairs() {
   let changed = false;
